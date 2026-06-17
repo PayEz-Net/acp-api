@@ -1,0 +1,12 @@
+node_modules/
+.acp/
+dist/
+build/
+*.log
+.env
+.env.*
+!.env.example
+coverage/
+.acp-test-*/ 
+package-lock.json
+.vs/

@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "allowJs": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "types": ["node"],
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": [
+    "agents/**/*.js",
+    "api/**/*.ts",
+    "api/**/*.js",
+    "autonomy/**/*.js",
+    "chat/**/*.ts",
+    "collaboration/**/*.js",
+    "core/**/*.js",
+    "kanban/**/*.js",
+    "config.ts"
+  ],
+  "exclude": ["node_modules", "dist", "**/__tests__/**"]
+}
