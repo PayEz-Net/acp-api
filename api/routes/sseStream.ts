@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import type { UpstreamSseManager } from '../sse/upstreamManager.js';
 import type { LocalEventBus } from '../sse/localEventBus.js';
+import { resolveTier, type AgentOutputStore } from '../terminal/agentOutputStore.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -10,16 +11,21 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
  * Heartbeat every 30s to keep connection alive.
  * Receives both upstream (mail from cloud) and local (party/autonomy) events.
  */
-export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, localEventBus?: LocalEventBus): Router {
+export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, localEventBus?: LocalEventBus, agentOutputStore?: AgentOutputStore): Router {
   const router = Router();
   const clients = new Set<{
     res: Response;
     agents: Set<string> | null; // null = all agents
+    projectId: string | null;
   }>();
 
-  // Register mail event handler — fan out to all connected downstream clients
-  upstreamManager.onMailEvent((agent, data) => {
-    const payload = JSON.stringify({ agent, ...data });
+  // Register mail event handler — fan out to all connected downstream clients.
+  // The upstream notification wraps the mail fields in notification.data;
+  // flatten that onto the SSE payload so the renderer sees
+  // { agent, message_id, from_agent, subject, ... }.
+  upstreamManager.onMailEvent((agent, notification) => {
+    const mailData = (notification.data as Record<string, unknown> | undefined) ?? {};
+    const payload = JSON.stringify({ agent, ...mailData });
     for (const client of clients) {
       if (client.agents === null || client.agents.has(agent)) {
         client.res.write(`event: mail\ndata: ${payload}\n\n`);
@@ -30,8 +36,25 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
   // Register local event handler — party/autonomy/standup events
   if (localEventBus) {
     localEventBus.onEvent((event) => {
-      const payload = JSON.stringify(event.data);
       for (const client of clients) {
+        // Per-agent terminal output must only reach clients subscribed to that
+        // agent (or to all agents) AND scoped to the client's project.
+        // Other local events remain broadcast until we have a reason to filter them.
+        if (event.event === 'agent-output') {
+          const agent = event.data?.agent as string | undefined;
+          if (client.agents !== null && agent && !client.agents.has(agent)) {
+            continue;
+          }
+          const eventProjectId = event.data?.project_id as string | undefined;
+          if (client.projectId !== null && eventProjectId && eventProjectId !== client.projectId) {
+            continue;
+          }
+          // Strip internal routing fields before writing to the wire.
+          const { project_id: _projectId, ...wireData } = event.data;
+          client.res.write(`event: ${event.event}\ndata: ${JSON.stringify(wireData)}\n\n`);
+          continue;
+        }
+        const payload = JSON.stringify(event.data);
         client.res.write(`event: ${event.event}\ndata: ${payload}\n\n`);
       }
     });
@@ -44,6 +67,9 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
       ? new Set((req.query.agents as string).split(',').map(a => a.trim()))
       : null;
 
+    const projectId = req.query.project_id as string | undefined;
+    const since = req.query.since as string | undefined;
+
     // Set SSE headers
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -55,7 +81,32 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
     // Send initial connected event
     res.write(`event: connected\ndata: ${JSON.stringify({ status: 'connected' })}\n\n`);
 
-    const client = { res, agents: agentFilter };
+    // Reconnect catch-up: emit stored lines newer than `since` before attaching to live bus.
+    // If `since` is missing or older than the retention window, clamp to the window start
+    // so a fresh or long-disconnected client never receives stale data beyond the tier cap.
+    if (agentOutputStore && projectId) {
+      try {
+        const tier = resolveTier();
+        const retentionStart = new Date(Date.now() - tier.maxDays * 24 * 60 * 60 * 1000).toISOString();
+        const effectiveSince = since && since > retentionStart ? since : retentionStart;
+        const agents = agentFilter ? Array.from(agentFilter) : undefined;
+        const lines = agentOutputStore.query({ project_id: projectId, since: effectiveSince, agents });
+        for (const line of lines) {
+          const payload = JSON.stringify({
+            agent: line.agent,
+            terminal_id: line.terminal_id,
+            provider: line.provider,
+            line: line.line,
+            ts: line.ts,
+          });
+          res.write(`event: agent-output\ndata: ${payload}\n\n`);
+        }
+      } catch (err) {
+        console.warn('[SSE] Catch-up query failed:', err);
+      }
+    }
+
+    const client = { res, agents: agentFilter, projectId: projectId ?? null };
     clients.add(client);
     if (localEventBus) localEventBus.sseClientCount = clients.size;
 
