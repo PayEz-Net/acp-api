@@ -4,10 +4,20 @@ import { success, error } from '../response.js';
 export default function documentRoutes(storage: any): Router {
   const router = Router();
 
+  function documentContext(req: Request): any {
+    return {
+      // Agent-identity callers see only their own documents; bearer (human/renderer)
+      // callers see the unfiltered client/project view.
+      agentName: (req as any).authMethod === 'agent' ? (req as any).agentName : undefined,
+      clientId: (req as any).clientId,
+      userId: (req as any).userId,
+    };
+  }
+
   // GET /v1/documents — list agent documents (optionally filter by project_id)
   router.get('/', async (req: Request, res: Response) => {
     try {
-      const filter: any = {};
+      const filter: any = documentContext(req);
       if (req.query.project_id !== undefined) {
         const pid = parseInt(req.query.project_id as string, 10);
         if (!isNaN(pid)) filter.project_id = pid;
@@ -27,7 +37,7 @@ export default function documentRoutes(storage: any): Router {
         res.status(400).json(error('VALIDATION_ERROR', 'title and content_md are required', 'document_create', (req as any).requestId));
         return;
       }
-      const doc = await storage.createDocument({ project_id, title, content_md, type, version });
+      const doc = await storage.createDocument({ project_id, title, content_md, type, version, ...documentContext(req) });
       res.status(201).json(success(doc, 'document_create', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'document_create', (req as any).requestId));
@@ -42,7 +52,7 @@ export default function documentRoutes(storage: any): Router {
         res.status(400).json(error('VALIDATION_ERROR', 'Invalid document ID', 'document_get', (req as any).requestId));
         return;
       }
-      const doc = await storage.getDocument(id);
+      const doc = await storage.getDocument(id, documentContext(req));
       if (!doc) {
         res.status(404).json(error('NOT_FOUND', 'Document not found', 'document_get', (req as any).requestId));
         return;
@@ -66,7 +76,7 @@ export default function documentRoutes(storage: any): Router {
         res.status(400).json(error('VALIDATION_ERROR', 'No update fields provided', 'document_update', (req as any).requestId));
         return;
       }
-      const doc = await storage.updateDocument(id, { title, content_md, document_type, version });
+      const doc = await storage.updateDocument(id, { title, content_md, document_type, version, ...documentContext(req) });
       if (!doc) {
         res.status(404).json(error('NOT_FOUND', 'Document not found', 'document_update', (req as any).requestId));
         return;
@@ -85,7 +95,7 @@ export default function documentRoutes(storage: any): Router {
         res.status(400).json(error('VALIDATION_ERROR', 'Invalid document ID', 'document_delete', (req as any).requestId));
         return;
       }
-      const deleted = await storage.deleteDocument(id);
+      const deleted = await storage.deleteDocument(id, documentContext(req));
       if (!deleted) {
         res.status(404).json(error('NOT_FOUND', 'Document not found', 'document_delete', (req as any).requestId));
         return;
