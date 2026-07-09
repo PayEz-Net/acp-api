@@ -79,7 +79,9 @@ export const config = {
     : process.env.VIBE_HMAC_KEY,
   acpLocalSecret: process.env.ACP_LOCAL_SECRET || '',
   acpCallbackPort: parseInt(process.env.ACP_CALLBACK_PORT ?? '', 10) || 40030,
-  acpAgents: (process.env.ACP_AGENTS || 'DotNetPert,BAPert,NextPert,QAPert,Aurum').split(',').map(a => a.trim()),
+  // No hardcoded agent roster. Upstream SignalR subscriptions are driven by
+  // the renderer's SSE connection (agents query param), not a baked-in list.
+  acpAgents: (process.env.ACP_AGENTS || '').split(',').map(a => a.trim()).filter(Boolean),
   vibeTokenCmd: process.env.VIBE_TOKEN_CMD || './cli.js token',
   vibeTokenRefreshS: parseInt(process.env.VIBE_TOKEN_REFRESH_S ?? '', 10) || 300,
   vibeAuthMode: process.env.VIBE_AUTH_MODE || 'bearer',

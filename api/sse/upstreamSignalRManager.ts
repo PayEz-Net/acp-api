@@ -206,20 +206,25 @@ export class UpstreamSignalRManager {
     const toAgent = data?.to_agent as string | undefined;
     const fromAgent = data?.from_agent as string | undefined;
 
-    // Forward to every tracked agent that matches the recipient. The desktop
-    // SSE consumer is already multiplexed by agent name; emitting to the
-    // intended recipient is enough for the mail badge/PTY injection to fire.
-    const targetAgent = toAgent && this.agents.has(toAgent) ? toAgent : undefined;
-    if (targetAgent) {
-      this.emit(targetAgent, notification);
+    if (!toAgent) {
+      console.warn('[SignalR] Dropping notification: missing to_agent. Cloud payload is not routing-ready.', {
+        event_type: notification.event_type,
+        message_id: data?.message_id,
+        from_agent: fromAgent,
+      });
       return;
     }
 
-    // Fallback: if recipient isn't in our tracked set, broadcast to all tracked
-    // agents so no mail is silently dropped.
-    for (const agent of this.agents) {
-      this.emit(agent, notification);
+    if (!this.agents.has(toAgent)) {
+      console.warn(`[SignalR] Dropping notification: recipient "${toAgent}" is not in the tracked agent set.`, {
+        event_type: notification.event_type,
+        message_id: data?.message_id,
+        from_agent: fromAgent,
+      });
+      return;
     }
+
+    this.emit(toAgent, notification);
   }
 
   private setAllStates(state: AgentSseState): void {

@@ -19,6 +19,35 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
     projectId: string | null;
   }>();
 
+  // Data-driven upstream subscriptions: union all explicitly-requested agent
+  // lists from renderer clients. No hardcoded roster, no fallback agents.
+  const subscribedAgents = new Set<string>();
+
+  function recomputeUpstream(): void {
+    const next = new Set<string>();
+    for (const client of clients) {
+      if (client.agents) {
+        for (const agent of client.agents) next.add(agent);
+      }
+    }
+
+    const changed =
+      next.size !== subscribedAgents.size ||
+      [...next].some(a => !subscribedAgents.has(a));
+    if (!changed) return;
+
+    subscribedAgents.clear();
+    for (const agent of next) subscribedAgents.add(agent);
+
+    if (subscribedAgents.size > 0) {
+      console.log(`[SSE] Renderer agent list changed, refreshing upstream subscriptions: ${Array.from(subscribedAgents).join(', ')}`);
+      upstreamManager.refresh(Array.from(subscribedAgents));
+    } else {
+      console.log('[SSE] No agents requested by renderer, stopping upstream subscriptions');
+      upstreamManager.stop();
+    }
+  }
+
   // Register mail event handler — fan out to all connected downstream clients.
   // The upstream notification wraps the mail fields in notification.data;
   // flatten that onto the SSE payload so the renderer sees
@@ -109,6 +138,7 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
     const client = { res, agents: agentFilter, projectId: projectId ?? null };
     clients.add(client);
     if (localEventBus) localEventBus.sseClientCount = clients.size;
+    recomputeUpstream();
 
     // Heartbeat to keep connection alive
     const heartbeat = setInterval(() => {
@@ -120,6 +150,7 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
       clearInterval(heartbeat);
       clients.delete(client);
       if (localEventBus) localEventBus.sseClientCount = clients.size;
+      recomputeUpstream();
     });
   });
 

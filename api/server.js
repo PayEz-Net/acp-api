@@ -327,10 +327,15 @@ if (process.argv[1]?.endsWith('server.js')) {
       logger.info('server', 'Local auth enabled');
     }
 
-    // Start upstream SSE connections
+    // Upstream SignalR subscriptions are data-driven from the renderer's SSE
+    // connection (see sseStream.ts). Do not auto-start with a hardcoded roster.
     const agents = config.acpAgents;
-    app._upstreamSse.start(agents);
-    console.log(`[ACP] SSE upstream started for ${agents.length} agents`);
+    if (agents.length > 0) {
+      app._upstreamSse.start(agents);
+      console.log(`[ACP] SignalR upstream started for ${agents.length} agents`);
+    } else {
+      console.log('[ACP] SignalR upstream waiting for renderer agent list');
+    }
 
     // Start health monitor for Electron callback server
     app._healthMonitor.start();
