@@ -1,13 +1,15 @@
 /**
- * Phase 1 CLI output scrubber (AC-2, BAPert msg 283).
+ * Phase 1 CLI output scrubber (AC-2, BAPert msg 283, QAPert #10508).
  *
- * Applied in ProcessMonitor.appendOutput before the captured text reaches
- * SSE or the `agent_contracts.output_buffer` column. Redacts two classes
- * of leaked material:
+ * Applied in ProcessMonitor.appendOutput and TerminalOutputBridge before the
+ * captured text reaches SSE or the `agent_output_events` table. Redacts:
  *
  *   1. EXACT-MATCH secret values: ACP-injected env var values (e.g.
  *      ACP_LOCAL_SECRET) that a `--verbose` vendor CLI might echo back.
- *   2. USER HOME PATH: replaced with `<home>` preserving trailing path
+ *   2. Provider API keys and 32+ character token-like strings adjacent to
+ *      key, token, secret, api, or sk-.
+ *   3. .env-style secret assignments.
+ *   4. USER HOME PATH: replaced with `<home>` preserving trailing path
  *      segments, across Windows and POSIX layouts.
  *
  * NOT a general-purpose PII redactor. Scope is limited to the Phase 1
@@ -35,6 +37,9 @@ export const DEFAULT_SECRET_ENV_KEYS: ReadonlyArray<string> = [
  * replacement across unrelated output.
  */
 const MIN_SECRET_LENGTH = 8;
+
+/** Minimum length for a token-like value to be treated as a secret. */
+const MIN_TOKEN_LENGTH = 32;
 
 export interface ScrubContext {
   /** Literal strings to replace with `<acp-env>` wherever they appear. */
@@ -93,7 +98,29 @@ export function scrubOutput(text: string, ctx: ScrubContext): string {
     out = out.split(v).join('<acp-env>');
   }
 
-  // Pass 2: case-insensitive user home prefix. We replace only the
+  // Pass 2: provider API keys and generic token-like strings adjacent to
+  // key, token, secret, api, or sk- (QAPert #10508).
+  // Examples: api_key=abc123..., token: "...", SECRET=...
+  // Capture group 1 is the keyword so it survives redaction.
+  const tokenLikeRe = new RegExp(
+    '\\b((?:api[_-]?key|api[_-]?token|apikey|apitoken|token|secret|key|sk))\\s*[:=]\\s*["\']?([A-Za-z0-9_\\-./+=]{' + MIN_TOKEN_LENGTH + ',})',
+    'gi',
+  );
+  out = out.replace(tokenLikeRe, '$1=<secret>');
+
+  // Pass 2b: OpenAI/Codex-style `sk-...` keys that may appear standalone.
+  out = out.replace(/\bsk-[a-zA-Z0-9_-]{32,}\b/gi, '<secret>');
+
+  // Pass 3: .env-style secret assignments (KEY=VALUE) where the key looks
+  // like a secret carrier and the value is non-trivial but NOT long enough
+  // to be caught by the token-like pass. Redacts the value but keeps the
+  // key/export keyword.
+  out = out.replace(
+    /^\s*(export\s+)?([A-Z_]*(?:SECRET|TOKEN|KEY|API|PASSWORD)[A-Z_]*)\s*=\s*(?!<env>|<secret>|<acp-env>)(\S{4,31})\s*$/gim,
+    '$1$2=<env>',
+  );
+
+  // Pass 4: case-insensitive user home prefix. We replace only the
   // user-specific part (drive + Users + <name>) and preserve the rest of
   // the path so downstream consumers can still reference file locations.
   const isWin = process.platform === 'win32';
@@ -104,7 +131,7 @@ export function scrubOutput(text: string, ctx: ScrubContext): string {
     out = out.replace(re, '<home>');
   }
 
-  // Pass 3: generic Windows home patterns we may not have captured from
+  // Pass 5: generic Windows home patterns we may not have captured from
   // env (e.g. paths in subprocess output referring to the default profile
   // under a different drive, 8.3 short-path forms, mixed case).
   //   C:\Users\<name>  or  D:\Users\<name>  (backslash)
@@ -113,7 +140,7 @@ export function scrubOutput(text: string, ctx: ScrubContext): string {
   out = out.replace(/[A-Za-z]:\\Users\\[^\\\/\r\n\s"'`]+/gi, '<home>');
   out = out.replace(/[A-Za-z]:\/Users\/[^\\\/\r\n\s"'`]+/gi, '<home>');
 
-  // Pass 4: POSIX home patterns.
+  // Pass 6: POSIX home patterns.
   //   /home/<name>/...    (Linux)
   //   /Users/<name>/...   (macOS)
   out = out.replace(/\/home\/[^\/\r\n\s"'`]+/g, '<home>');

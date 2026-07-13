@@ -69,9 +69,10 @@ class NotAuthenticatedError extends Error {
 // X-Client-Id mirrors the bearer's own client_id (the user's tenant), not the
 // retired hardcoded idealvibe client — see requireTokenClientId.
 function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
+  const clientId = requireTokenClientId(token);
   return {
     'Authorization': `Bearer ${token}`,
-    'X-Client-Id': requireTokenClientId(token),
+    'X-Client-Id': clientId,
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };
@@ -182,6 +183,11 @@ async function readList(
     if (status >= 200 && status < 300 && (payload as any)?.success) {
       const projects = extractAndMapList(payload);
       const entry = cache.list.set(userId, projects);
+      console.log(
+        '[ProjectsProxy] project list for user', userId,
+        '→', projects.length, 'projects:',
+        projects.map((p) => ({ id: p.id, name: p.name, status: p.status, is_active: p.is_active }))
+      );
       return { projects, source: 'cloud', fetchedAt: entry.fetchedAt };
     }
     const stale = cache.list.getStale(userId);
@@ -242,6 +248,12 @@ async function readCurrent(
     if (status >= 200 && status < 300 && (payload as any)?.success) {
       const mapped = extractAndMapCurrent(payload);
       const entry = cache.current.set(userId, mapped);
+      console.log(
+        '[ProjectsProxy] current-project for user', userId,
+        '→ project_id:', entry.current_project_id,
+        'project:', entry.project ? { id: entry.project.id, name: entry.project.name, status: entry.project.status, is_active: entry.project.is_active } : null,
+        'state:', entry.current_project_state
+      );
       return {
         current_project_id: entry.current_project_id,
         project: entry.project,

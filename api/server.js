@@ -1,5 +1,6 @@
 // ACP API server
 import express from 'express';
+import path from 'path';
 import { config } from '../config.js';
 import { SessionManager } from '../agents/session_manager.js';
 import { cors, requestId, timing, errorHandler } from './middleware.js';
@@ -18,7 +19,7 @@ import autonomyRoutes from './routes/autonomy.js';
 import registryRoutes from './routes/registry.js';
 import notificationRoutes from './routes/notifications.js';
 import { PartyEngine } from '../collaboration/party_engine.js';
-import { UpstreamSseManager } from './sse/upstreamManager.js';
+import { UpstreamSignalRManager } from './sse/upstreamSignalRManager.js';
 import sseStreamRoutes from './routes/sseStream.js';
 import { BackoffManager } from './lifecycle/backoff.js';
 import { HealthMonitor } from './lifecycle/healthMonitor.js';
@@ -26,6 +27,8 @@ import agentLifecycleRoutes from './routes/agentLifecycle.js';
 import { resolveMemberEffort, resolveTeamRuntime } from './routes/team.js';
 import { bootstrap } from '../core/bootstrap.js';
 import { LocalEventBus } from './sse/localEventBus.js';
+import { TerminalOutputBridge } from './terminal/terminalOutputBridge.js';
+import { AgentOutputStore, resolveTier } from './terminal/agentOutputStore.js';
 import { LifecycleHooks } from './lifecycle/hooks.js';
 import { Supervisor } from '../autonomy/supervisor.js';
 import { logger, setLogLevel, requestLogger } from './logging/logger.js';
@@ -127,6 +130,11 @@ export async function createApp(cfg) {
   // Local event bus for party/autonomy SSE events
   const localEventBus = new LocalEventBus();
 
+  // Terminal output bridge: raw PTY output -> normalized SSE agent-output events
+  const agentOutputStore = new AgentOutputStore();
+  const terminalOutputBridge = new TerminalOutputBridge(localEventBus, agentOutputStore);
+  terminalOutputBridge.startPeriodicFlush();
+
   // WO-1 Deliverable C seam: sidecar = SOLE terminal-dead authority (§9
   // Option A). Inject the one-shot AUTH_SESSION_DEAD emitter so tokenManager
   // can push to the renderer over the EXISTING SSE stream without importing
@@ -166,9 +174,10 @@ export async function createApp(cfg) {
     if (mailSentCallback) mailSentCallback(from, subject, to);
   }, contractorService, contractorSessionManager));
 
-  // SSE — upstream (mail from cloud) + local (party/autonomy) events → downstream fan-out
-  const upstreamSse = new UpstreamSseManager(appConfig);
-  app.use('/v1/sse', sseStreamRoutes(upstreamSse, localEventBus));
+  // SignalR upstream (mail from cloud) → local SSE downstream fan-out.
+  // Replaces per-agent cloud SSE: SignalR + Redis backplane survives multi-pod.
+  const upstreamSse = new UpstreamSignalRManager(appConfig);
+  app.use('/v1/sse', sseStreamRoutes(upstreamSse, localEventBus, agentOutputStore));
 
   // WO-1 Deliverable D §5.6 — queryable [AuthRC] ring-buffer surface.
   // Authenticated (mounted after localAuth) — renderer/diagnostics only.
@@ -209,7 +218,8 @@ export async function createApp(cfg) {
         if (result.ok) {
           const data = await result.json();
           const terminalId = data?.terminalId || data?.data?.terminalId || '';
-          backoffManager.markSpawned(agentName, terminalId, session.sessionId || '');
+          state.provider = freshRuntime || null;
+          backoffManager.markSpawned(agentName, terminalId, session.sessionId || '', state.provider);
           console.log(`[Lifecycle] ${agentName}: auto-restarted successfully`);
         } else {
           state.status = 'error';
@@ -246,6 +256,31 @@ export async function createApp(cfg) {
       exit_code: exitCode,
       new_status: backoffManager.get(agentName)?.status || 'unknown',
     }, 'pty_exit', req.requestId));
+  });
+
+  // Internal PTY output route — raw chunks from acp-desktop -> normalized SSE + storage
+  // Per BAPert #10522, project_id and session_id are resolved server-side from the
+  // agent's lifecycle state; the desktop payload is not trusted for scoping.
+  app.post('/internal/pty/output', async (req, res) => {
+    const { agentName, terminalId, data, provider } = req.body || {};
+    if (!agentName || !terminalId || typeof data !== 'string') {
+      terminalOutputBridge.recordInvalidInput();
+      return res.status(400).json(error('INVALID_REQUEST', 'agentName, terminalId, and data string required', 'pty_output', req.requestId));
+    }
+    const state = backoffManager.get(agentName);
+    if (!state || state.projectId == null || !state.sessionId) {
+      terminalOutputBridge.recordInvalidInput();
+      return res.status(400).json(error('AGENT_NOT_REGISTERED', 'Agent lifecycle state not found; project/session cannot be resolved', 'pty_output', req.requestId));
+    }
+    const resolvedProvider = state.provider || provider || 'unknown';
+    const resolvedProjectId = String(state.projectId);
+    const resolvedSessionId = state.sessionId;
+    terminalOutputBridge.push(agentName, terminalId, data, resolvedProvider, resolvedProjectId, resolvedSessionId);
+    res.json(success({
+      agent_name: agentName,
+      terminal_id: terminalId,
+      received_bytes: data.length,
+    }, 'pty_output', req.requestId));
   });
 
   app.use('/v1/agents', bootstrapRoutes(sessionManager));

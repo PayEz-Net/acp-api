@@ -4,7 +4,7 @@
  * Downstream SSE clients subscribe and receive them alongside mail events.
  */
 
-export type LocalEventType = 'party-update' | 'autonomy-update' | 'standup-entry' | 'agent-status' | 'kanban-update' | 'chat-message' | 'contractor-hired' | 'contractor-completed' | 'contractor-expired' | 'contractor-cancelled' | 'contractor-queued' | 'contractor-mailbox-assigned' | 'contractor-promoted' | 'session-started' | 'session-output' | 'session-exited' | 'project-switched' | 'unattended-started' | 'unattended-paused' | 'auth-session-dead';
+export type LocalEventType = 'party-update' | 'autonomy-update' | 'standup-entry' | 'agent-status' | 'kanban-update' | 'chat-message' | 'contractor-hired' | 'contractor-completed' | 'contractor-expired' | 'contractor-cancelled' | 'contractor-queued' | 'contractor-mailbox-assigned' | 'contractor-promoted' | 'session-started' | 'session-output' | 'session-exited' | 'project-switched' | 'unattended-started' | 'unattended-paused' | 'auth-session-dead' | 'agent-output';
 
 export interface LocalEvent {
   event: LocalEventType;
@@ -48,6 +48,10 @@ export class LocalEventBus {
 
   emitAgentStatus(data: Record<string, unknown>): void {
     this.emit({ event: 'agent-status', data });
+  }
+
+  emitAgentOutput(data: Record<string, unknown>): void {
+    this.emit({ event: 'agent-output', data });
   }
 
   // WO-1 Deliverable C: sidecar is the SOLE authority for terminal-dead.

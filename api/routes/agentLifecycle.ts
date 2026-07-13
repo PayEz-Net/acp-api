@@ -3,7 +3,7 @@ import { success, error } from '../response.js';
 import type { BackoffManager } from '../lifecycle/backoff.js';
 import type { HealthMonitor } from '../lifecycle/healthMonitor.js';
 import type { Config } from '../../config.js';
-import { resolveMemberEffort, resolveTeamRuntime } from './team.js';
+import { resolveAgentId, resolveMemberEffort, resolveTeamRuntime } from './team.js';
 
 interface LifecycleDeps {
   cfg: Config;
@@ -82,11 +82,19 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       // Bootstrap session
       const { session } = await bootstrap(name);
 
+      // Resolve the canonical agent_id so the Electron side can start a
+      // PayEzVibe agent_session for the stream endpoint.
+      const agentId = typeof req.body?.agentId === 'number'
+        ? req.body.agentId
+        : (state.projectId != null ? await resolveAgentId(cfg, state.projectId, name) : undefined);
+
       // Call Electron to spawn PTY
       const result = await callElectron(cfg, callbackPort, '/internal/pty/spawn', {
         agentName: name,
         workDir: workDir || undefined,
         autoReport: state.autoReport,
+        projectId: state.projectId ?? undefined,
+        ...(agentId != null ? { agentId } : {}),
         ...(validRuntime ? { runtime: validRuntime } : {}),
         ...(validEffort ? { effort: validEffort } : {}),
       });
@@ -95,7 +103,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       if (result.status === 409) {
         const existingId = result.data?.terminalId || result.data?.data?.terminalId || '';
         if (existingId) {
-          backoff.markSpawned(name, existingId, session.sessionId || session.session?.sessionId || '');
+          backoff.markSpawned(name, existingId, session.sessionId || session.session?.sessionId || '', validRuntime);
           res.json(success({
             agent_name: name,
             terminal_id: existingId,
@@ -129,7 +137,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       }
 
       const terminalId = result.data?.terminalId || result.data?.data?.terminalId || '';
-      backoff.markSpawned(name, terminalId, session.sessionId || session.session?.sessionId || '');
+      backoff.markSpawned(name, terminalId, session.sessionId || session.session?.sessionId || '', validRuntime);
 
       res.json(success({
         agent_name: name,
@@ -222,10 +230,16 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       const freshRuntime = state.projectId != null
         ? await resolveTeamRuntime(cfg, state.projectId)
         : undefined;
+      const freshAgentId = state.projectId != null
+        ? await resolveAgentId(cfg, state.projectId, name)
+        : undefined;
+
       const result = await callElectron(cfg, callbackPort, '/internal/pty/spawn', {
         agentName: name,
         workDir: state.workDir || undefined,
         autoReport: state.autoReport,
+        projectId: state.projectId ?? undefined,
+        ...(freshAgentId != null ? { agentId: freshAgentId } : {}),
         ...(freshEffort ? { effort: freshEffort } : {}),
         ...(freshRuntime ? { runtime: freshRuntime } : {}),
       });
@@ -239,7 +253,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       }
 
       const terminalId = result.data?.terminalId || result.data?.data?.terminalId || '';
-      backoff.markSpawned(name, terminalId, session.sessionId || session.session?.sessionId || '');
+      backoff.markSpawned(name, terminalId, session.sessionId || session.session?.sessionId || '', freshRuntime);
 
       res.json(success({
         agent_name: name,

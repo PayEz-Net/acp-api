@@ -99,7 +99,7 @@ export interface MappedProject {
   owner_user_id: number;
   name: string;
   description?: string;
-  status: 'active';
+  status: 'active' | 'archived';
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -127,7 +127,7 @@ export function mapCloudProject(p: CloudProjectDto): MappedProject {
     owner_user_id: p.owner_user_id,
     name: p.name,
     ...(p.description ? { description: p.description } : {}),
-    status: 'active',
+    status: p.is_active ? 'active' : 'archived',
     is_active: p.is_active,
     created_at: p.created_at,
     updated_at: p.updated_at ?? p.created_at,

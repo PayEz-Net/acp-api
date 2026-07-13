@@ -127,6 +127,51 @@ async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<Cloud
  * OMITS effort -> the single spawn resolver defers to the global default.
  * Never substitutes 'high' here (Aurum 1413: one resolver owns 'high').
  */
+/**
+ * Resolve a team member's numeric agent_id from the canonical project team.
+ * Mirrors resolveMemberEffort/resolveTeamRuntime: always authoritative, no cache.
+ */
+export async function resolveAgentId(
+  cfg: Config,
+  projectId: number,
+  agentName: string,
+): Promise<number | undefined> {
+  const signedPath = `${PROJECT_TEAM_PATH}/${projectId}/team`;
+  const url = `${cfg.vibeApiUrl}${signedPath}`;
+  let token = await ensureValidToken(cfg.idpUrl);
+  if (!token) return undefined;
+
+  const doFetch = async (bearer: string): Promise<{ status: number; body: any }> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { method: 'GET', headers: buildAuthHeaders(cfg, bearer), signal: controller.signal });
+      const raw = await res.text();
+      let body: any = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* leave null */ }
+      return { status: res.status, body };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  try {
+    let attempt = await doFetch(token);
+    if (attempt.status === 401) {
+      const refreshed = await forceRefresh(cfg.idpUrl);
+      if (!refreshed) return undefined;
+      attempt = await doFetch(refreshed);
+    }
+    if (attempt.status < 200 || attempt.status >= 300) return undefined;
+    const team = attempt.body?.data?.team;
+    if (!Array.isArray(team)) return undefined;
+    const member = team.find((m: any) => m && m.agent_name === agentName);
+    return typeof member?.agent_id === 'number' ? member.agent_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function resolveMemberEffort(
   cfg: Config,
   projectId: number,

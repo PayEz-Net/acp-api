@@ -1,7 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
 import { config } from '../../config.js';
-import { ensureValidToken, forceRefresh, requireTokenClientId } from '../auth/tokenManager.js';
+import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
+import * as projectsCache from '../projects/cache.js';
 
 import { fileURLToPath } from 'url';
 import * as path from 'path';
@@ -111,13 +112,26 @@ async function proxyAgentCloud(
   res.status(result.status).json(result.body);
 }
 
+function resolveCurrentProjectId(): number | null {
+  const session = getSession();
+  if (!session?.userId) return null;
+  const entry = projectsCache.current.getFresh(session.userId)
+    ?? projectsCache.current.getStale(session.userId);
+  return entry?.current_project_id ?? null;
+}
+
 async function resolveAgentNameToId(name: string): Promise<number | null> {
   const cached = nameToIdCache.get(name);
   if (cached !== undefined && Date.now() - nameToIdCachePopulatedAt < NAME_TO_ID_TTL_MS) {
     return cached;
   }
 
-  const result = await cloudFetch('/v1/agentmail/agents');
+  // Project-scope the roster when possible so name resolution matches the
+  // project-scoped sidebar/mail view. Falls back to the full tenant roster
+  // when no current project is cached.
+  const projectId = resolveCurrentProjectId();
+  const query = projectId != null ? `?project_id=${projectId}` : '';
+  const result = await cloudFetch(`/v1/agentmail/agents${query}`);
   if ('error' in result) return null;
   if (result.status < 200 || result.status >= 300) return null;
   const agents = result.body?.data?.agents;
@@ -126,11 +140,27 @@ async function resolveAgentNameToId(name: string): Promise<number | null> {
   // Repopulate cache from this fetch — single roundtrip covers all canonical
   // agents, no point caching just the one we asked for.
   nameToIdCache.clear();
+  const candidatesByName = new Map<string, Array<{ id: number; identityPrompt: string }>>();
   for (const a of agents) {
     if (a && typeof a.id === 'number' && typeof a.name === 'string') {
-      nameToIdCache.set(a.name, a.id);
+      const list = candidatesByName.get(a.name) ?? [];
+      list.push({
+        id: a.id,
+        identityPrompt: typeof a.identity_prompt === 'string' ? a.identity_prompt : '',
+      });
+      candidatesByName.set(a.name, list);
     }
   }
+
+  // When multiple docs share the same name (e.g. a seeded primary agent and a
+  // workshop-created agent with the same name), prefer the one that actually
+  // has a profile. This prevents empty-profile fallbacks caused by duplicate
+  // agent rows where one has an empty identity_prompt.
+  for (const [agentName, candidates] of candidatesByName.entries()) {
+    const chosen = candidates.find(c => c.identityPrompt.length > 0) ?? candidates[0];
+    nameToIdCache.set(agentName, chosen.id);
+  }
+
   nameToIdCachePopulatedAt = Date.now();
   return nameToIdCache.get(name) ?? null;
 }

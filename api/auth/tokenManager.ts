@@ -126,16 +126,20 @@ export function getTerminalReason(): { code: string; message: string; ts: string
 }
 
 function decodeJwtExp(token: string): Date | null {
+  const payload = decodeJwtPayload(token);
+  if (payload && typeof payload.exp === 'number') {
+    return new Date(payload.exp * 1000);
+  }
+  return null;
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   try {
     const payloadB64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
     const padded = payloadB64 + '='.repeat((4 - payloadB64.length % 4) % 4);
-    const payload = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
-    if (typeof payload.exp === 'number') {
-      return new Date(payload.exp * 1000);
-    }
-    return null;
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
   } catch {
     return null;
   }
@@ -231,6 +235,13 @@ export function setSession(session: TokenSession): void {
 
   // If the caller passed an access token, prefer the JWT's own exp claim.
   const jwtExp = decodeJwtExp(session.accessToken);
+  const jwtPayload = decodeJwtPayload(session.accessToken);
+  console.log(
+    '[TokenManager] Session set — user_id:', session.userId,
+    'email:', session.email,
+    'client_id:', jwtPayload?.client_id ?? '(missing)',
+    'exp:', jwtExp?.toISOString() ?? '(missing)'
+  );
   currentSession = {
     ...session,
     expiresAt: jwtExp ?? session.expiresAt,

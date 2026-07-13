@@ -131,6 +131,20 @@ export class UpstreamSignalRManager {
       console.log('[SignalR] Subscribed event:', result);
     });
 
+    // The agent-mail hub broadcasts broader project/agent events; this
+    // upstream consumer only cares about mail notifications. Register no-op
+    // handlers for the rest so SignalR stops spamming "No client method found".
+    const noOpMethods = [
+      'connected',
+      'project-lifecycle-changed',
+      'project-kanban-active-count-changed',
+      'agent-status-changed',
+      'project-activity-event',
+    ];
+    for (const method of noOpMethods) {
+      conn.on(method, () => { /* ignored by mail upstream */ });
+    }
+
     conn.onreconnecting((err) => {
       console.warn('[SignalR] reconnecting:', err?.message || 'connection lost');
       this.setAllStates('reconnecting');

@@ -18,6 +18,9 @@ export interface AgentState {
    *  mini-hydra). null = caller didn't send projectId -> restart can't
    *  look up -> defers to the global resolver (documented micro-gap). */
   projectId: number | null;
+  /** Runtime/provider the agent was spawned with. Used server-side to tag
+   *  terminal output events; the desktop client value is only a fallback. */
+  provider: string | null;
   autoReport: boolean;
   consecutiveCrashes: number;
   restartCount: number;
@@ -45,6 +48,7 @@ export class BackoffManager {
         sessionId: null,
         workDir: null,
         projectId: null,
+        provider: null,
         autoReport: true,
         consecutiveCrashes: 0,
         restartCount: 0,
@@ -71,11 +75,12 @@ export class BackoffManager {
    * Called when an agent is spawned successfully.
    * Starts the stability timer — resets crash counter after 5 minutes.
    */
-  markSpawned(name: string, terminalId: string, sessionId: string): void {
+  markSpawned(name: string, terminalId: string, sessionId: string, provider?: string | null): void {
     const state = this.getOrCreate(name);
     state.status = 'ready';
     state.terminalId = terminalId;
     state.sessionId = sessionId;
+    if (provider !== undefined) state.provider = provider ?? null;
     state.lastSpawnedAt = Date.now();
     state.lastExitCode = null;
 

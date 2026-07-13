@@ -27,7 +27,7 @@ import type {
   MappedProjectTeamMember,
 } from './mapper.js';
 
-const TTL_MS = 60_000;
+const TTL_MS = 0;
 
 export interface ProjectListEntry {
   projects: MappedProject[];

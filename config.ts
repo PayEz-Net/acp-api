@@ -95,10 +95,12 @@ export const config = {
   autonomyMaxRuntimeHours: parseInt(process.env.AUTONOMY_MAX_RUNTIME_HOURS ?? '', 10) || 4,
   escalationSensitivity: parseInt(process.env.ESCALATION_SENSITIVITY ?? '', 10) || 2,
 
-  // Deprecated: VibeSQL config - kept for compatibility but not used
+  // VibeSQL direct lane — used by agent roster raw queries and the agent
+  // document store. Kept central here so callers don't proliferate env reads.
   vibesqlUrl: process.env.VIBESQL_URL || '',
   vibesqlDirectUrl: process.env.VIBESQL_DIRECT_URL || '',
   vibesqlContainerSecret: process.env.VIBESQL_CONTAINER_SECRET || '',
+  vibesqlSecret: process.env.VIBESQL_SECRET || process.env.VIBESQL_CONTAINER_SECRET || '',
 };
 
 export type Config = typeof config;
