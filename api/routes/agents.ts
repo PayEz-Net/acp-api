@@ -121,7 +121,8 @@ function resolveCurrentProjectId(): number | null {
 }
 
 async function resolveAgentNameToId(name: string): Promise<number | null> {
-  const cached = nameToIdCache.get(name);
+  const normalizedName = name.toLowerCase();
+  const cached = nameToIdCache.get(normalizedName);
   if (cached !== undefined && Date.now() - nameToIdCachePopulatedAt < NAME_TO_ID_TTL_MS) {
     return cached;
   }
@@ -143,12 +144,13 @@ async function resolveAgentNameToId(name: string): Promise<number | null> {
   const candidatesByName = new Map<string, Array<{ id: number; identityPrompt: string }>>();
   for (const a of agents) {
     if (a && typeof a.id === 'number' && typeof a.name === 'string') {
-      const list = candidatesByName.get(a.name) ?? [];
+      const normalizedName = a.name.toLowerCase();
+      const list = candidatesByName.get(normalizedName) ?? [];
       list.push({
         id: a.id,
         identityPrompt: typeof a.identity_prompt === 'string' ? a.identity_prompt : '',
       });
-      candidatesByName.set(a.name, list);
+      candidatesByName.set(normalizedName, list);
     }
   }
 
@@ -162,7 +164,7 @@ async function resolveAgentNameToId(name: string): Promise<number | null> {
   }
 
   nameToIdCachePopulatedAt = Date.now();
-  return nameToIdCache.get(name) ?? null;
+  return nameToIdCache.get(normalizedName) ?? null;
 }
 
 interface CloudProfileShape {
