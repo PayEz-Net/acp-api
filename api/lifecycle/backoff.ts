@@ -89,6 +89,10 @@ export class BackoffManager {
     state.stabilityTimer = setTimeout(() => {
       state.consecutiveCrashes = 0;
     }, STABILITY_RESET_MS);
+    // Internal bookkeeping must never keep the process alive on its own —
+    // an un-unref'd 5-minute timer is what hung jest after PASS when suites
+    // mounted the lifecycle routes without forceExit (WO 11489).
+    state.stabilityTimer.unref?.();
   }
 
   /**
