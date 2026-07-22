@@ -215,6 +215,56 @@ export async function resolveMemberEffort(
 }
 
 /**
+ * resolveMemberModel — sibling of resolveMemberEffort (WO 11469): re-resolve a
+ * member's model_override FRESH from the DB at (re)start, so a restarted kimi
+ * agent keeps its `-m` alias AND its k3 effort env (the effort gate keys on
+ * modelOverride === 'k3' — losing the model silently loses the effort too).
+ * Never narrowed here: the spawn boundary (KIMI_MODEL_ALIASES) is the
+ * fail-loud authority on unknown ids; undefined = inherit the CLI default.
+ */
+export async function resolveMemberModel(
+  cfg: Config,
+  projectId: number,
+  agentName: string,
+): Promise<string | undefined> {
+  const signedPath = `${PROJECT_TEAM_PATH}/${projectId}/team`;
+  const url = `${cfg.vibeApiUrl}${signedPath}`;
+  let token = await ensureValidToken(cfg.idpUrl);
+  if (!token) return undefined; // no session -> can't look up -> inherit
+
+  const doFetch = async (bearer: string): Promise<{ status: number; body: any }> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { method: 'GET', headers: buildAuthHeaders(cfg, bearer), signal: controller.signal });
+      const raw = await res.text();
+      let body: any = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* leave null */ }
+      return { status: res.status, body };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  try {
+    let attempt = await doFetch(token);
+    if (attempt.status === 401) {
+      const refreshed = await forceRefresh(cfg.idpUrl);
+      if (!refreshed) return undefined;
+      attempt = await doFetch(refreshed);
+    }
+    if (attempt.status < 200 || attempt.status >= 300) return undefined;
+    const team = attempt.body?.data?.team;
+    if (!Array.isArray(team)) return undefined;
+    const member = team.find((m: any) => m && m.agent_name === agentName);
+    const m = member?.model_override;
+    return (typeof m === 'string' && m.trim()) ? m.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * WO #84135 §3.1 — the SINGLE source-of-truth resolver for a project's TEAM
  * runtime (claude | kimi). Runtime is a TEAM-level setting (one value
  * per project, applied to every agent — §1, Jon 2026-06-16), unlike the

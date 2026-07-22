@@ -3,7 +3,7 @@ import { success, error } from '../response.js';
 import type { BackoffManager } from '../lifecycle/backoff.js';
 import type { HealthMonitor } from '../lifecycle/healthMonitor.js';
 import type { Config } from '../../config.js';
-import { resolveAgentId, resolveMemberEffort, resolveTeamRuntime } from './team.js';
+import { resolveAgentId, resolveMemberEffort, resolveMemberModel, resolveTeamRuntime } from './team.js';
 
 interface LifecycleDeps {
   cfg: Config;
@@ -49,7 +49,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
   // POST /v1/lifecycle/agents/:name/spawn
   router.post('/:name/spawn', async (req: Request, res: Response) => {
     const name = req.params.name as string;
-    const { workDir, autoReport, runtime, effort, projectId } = req.body || {};
+    const { workDir, autoReport, runtime, effort, model, projectId } = req.body || {};
 
     // Project-driven runtime — renderer reads activeProject.runtime_choice
     // and POSTs it here. Forwarded as-is to the Electron callback server;
@@ -67,6 +67,14 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
     // Aurum 1401/1411). Per-member, unlike the project-uniform runtime.
     const validEffort = (effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'max')
       ? effort
+      : undefined;
+
+    // Per-agent model override (kimi). Same pass-through contract as effort:
+    // the renderer (manual spawn) or a restart re-resolve POSTs the member's
+    // model_override; forward un-narrowed — KIMI_MODEL_ALIASES at the spawn
+    // boundary is the fail-loud authority (WO 11469). Absent -> inherit.
+    const validModel = (typeof model === 'string' && model.trim())
+      ? model.trim()
       : undefined;
 
     try {
@@ -97,6 +105,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
         ...(agentId != null ? { agentId } : {}),
         ...(validRuntime ? { runtime: validRuntime } : {}),
         ...(validEffort ? { effort: validEffort } : {}),
+        ...(validModel ? { model: validModel } : {}),
       });
 
       // 409 = agent already running — reuse existing terminalId
@@ -233,6 +242,12 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       const freshAgentId = state.projectId != null
         ? await resolveAgentId(cfg, state.projectId, name)
         : undefined;
+      // WO 11469 (b): re-resolve the member's model_override FRESH too —
+      // symmetry with freshEffort. Without it a restarted kimi agent lost its
+      // -m alias AND its k3 effort env (the effort gate keys on the model).
+      const freshModel = state.projectId != null
+        ? await resolveMemberModel(cfg, state.projectId, name)
+        : undefined;
 
       const result = await callElectron(cfg, callbackPort, '/internal/pty/spawn', {
         agentName: name,
@@ -242,6 +257,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
         ...(freshAgentId != null ? { agentId: freshAgentId } : {}),
         ...(freshEffort ? { effort: freshEffort } : {}),
         ...(freshRuntime ? { runtime: freshRuntime } : {}),
+        ...(freshModel ? { model: freshModel } : {}),
       });
 
       if (result.status !== 200) {
