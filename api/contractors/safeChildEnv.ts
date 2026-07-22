@@ -56,11 +56,20 @@ export const DEFAULT_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
  * configured `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / etc. in their
  * shell; the vendor CLI's job is to read them. We pass through but do not
  * inject.
+ *
+ * `KIMI_` is included (WO-KIMI-MODEL-OVERRIDE decision): kimi CLI is a
+ * vendor CLI like any other — it reads its own config namespace
+ * (`KIMI_API_KEY`, `KIMI_BASE_URL`, `KIMI_MODEL_*`). Stripping it would
+ * leave contractor-spawned kimi children without credentials or model
+ * config. Same vendor class as the already-allowed `MOONSHOT_`. The
+ * injection of `KIMI_MODEL_THINKING_EFFORT` itself happens at the
+ * acp-desktop spawn boundary, not here.
  */
 export const VENDOR_PREFIXES: ReadonlyArray<string> = [
   'ANTHROPIC_',
   'OPENAI_',
   'MOONSHOT_',
+  'KIMI_',
   'CLAUDE_', // older Claude CLI env vars
 ];
 

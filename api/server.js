@@ -24,7 +24,7 @@ import sseStreamRoutes from './routes/sseStream.js';
 import { BackoffManager } from './lifecycle/backoff.js';
 import { HealthMonitor } from './lifecycle/healthMonitor.js';
 import agentLifecycleRoutes from './routes/agentLifecycle.js';
-import { resolveMemberEffort, resolveTeamRuntime } from './routes/team.js';
+import { resolveMemberEffort, resolveMemberModel, resolveTeamRuntime } from './routes/team.js';
 import { bootstrap } from '../core/bootstrap.js';
 import { LocalEventBus } from './sse/localEventBus.js';
 import { TerminalOutputBridge } from './terminal/terminalOutputBridge.js';
@@ -207,13 +207,18 @@ export async function createApp(cfg) {
         const freshRuntime = state.projectId != null
           ? await resolveTeamRuntime(appConfig, state.projectId)
           : undefined;
+        // WO 11469 (b): re-resolve model_override FRESH as well — a restarted
+        // kimi agent must keep its -m alias AND its k3 effort env.
+        const freshModel = state.projectId != null
+          ? await resolveMemberModel(appConfig, state.projectId, agentName)
+          : undefined;
         const result = await fetch(`http://127.0.0.1:${callbackPort}/internal/pty/spawn`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${appConfig.acpLocalSecret}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(freshEffort ? { effort: freshEffort } : {}), ...(freshRuntime ? { runtime: freshRuntime } : {}) }),
+          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(freshEffort ? { effort: freshEffort } : {}), ...(freshRuntime ? { runtime: freshRuntime } : {}), ...(freshModel ? { model: freshModel } : {}) }),
         });
         if (result.ok) {
           const data = await result.json();

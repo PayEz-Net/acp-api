@@ -115,6 +115,20 @@ describe('safeChildEnv', () => {
     expect(out.MOONSHOT_API_KEY).toBe('mk');
   });
 
+  test('passes through the KIMI_ vendor namespace (WO-KIMI-MODEL-OVERRIDE)', () => {
+    const out = safeChildEnv({}, {
+      source: {
+        PATH: '/bin',
+        KIMI_API_KEY: 'kk',
+        KIMI_BASE_URL: 'https://api.example.com/v1',
+        KIMI_MODEL_THINKING_EFFORT: 'high',
+      },
+    });
+    expect(out.KIMI_API_KEY).toBe('kk');
+    expect(out.KIMI_BASE_URL).toBe('https://api.example.com/v1');
+    expect(out.KIMI_MODEL_THINKING_EFFORT).toBe('high');
+  });
+
   test('inject overrides source', () => {
     const out = safeChildEnv({ PATH: '/override' }, { source: { PATH: '/original' } });
     expect(out.PATH).toBe('/override');

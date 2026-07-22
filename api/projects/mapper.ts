@@ -81,6 +81,13 @@ export interface CloudProjectTeamMemberDto {
   role: string | null;
   runtime_override: RuntimeId | null;
   work_dir_override: string | null;
+  // WO-KIMI-MODEL-OVERRIDE: per-member effort (Claude --effort / k3 thinking
+  // effort) and bare kimi model id (null = inherit default_model). Both were
+  // already flowing from cloud but undeclared here, so typed consumers could
+  // not see them — declare, never narrow (unknown ids must fail loud at the
+  // spawn boundary, not be stripped into a silent inherit).
+  effort_override: string | null;
+  model_override: string | null;
   position_hint: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | null;
   is_lead: boolean;
   added_at: string;
