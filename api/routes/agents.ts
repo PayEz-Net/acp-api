@@ -181,6 +181,21 @@ interface CloudProfileShape {
   version?: number;
 }
 
+/**
+ * Remove the deprecated self-managed status section from an agent profile.
+ * We decided agents (Kimi/Claude) decide their own busy state; the old
+ * POST /v1/status instructions are no longer mounted and should not be
+ * surfaced to avoid confusion.
+ */
+function stripSelfManagedStatus(profile: string): string {
+  // Match the section from a `---` rule followed by `## Self-managed status`
+  // up to the next `---` rule or end of string. Then tidy leftover whitespace.
+  return profile
+    .replace(/\n---\r?\n## Self-managed status[\s\S]*?(?=\n---\r?\n|$)/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function mapCloudProfile(
   cloudProfile: CloudProfileShape,
   meta: { name: string; displayName?: string; role?: string },
@@ -205,7 +220,7 @@ function mapCloudProfile(
     cloudProfile.communication_md,
     cloudProfile.response_pattern_md,
   ].filter((s): s is string => typeof s === 'string' && s.length > 0);
-  const profile = sections.join('\n\n');
+  const profile = stripSelfManagedStatus(sections.join('\n\n'));
   return {
     name: meta.name,
     displayName: meta.displayName || meta.name,
