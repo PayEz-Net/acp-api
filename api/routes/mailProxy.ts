@@ -144,6 +144,40 @@ async function proxyToCloud(
 
 type MailSentCallback = (fromAgent: string, subject: string, toAgents: string[]) => void;
 
+// SESSION_INACTIVE rewrite: the cloud transiently 404s with
+// {"code":"SESSION_INACTIVE","message":"Session is not active"} during backend
+// blips (observed recovering on its own within ~a minute). Agents read that
+// body LITERALLY — "my session is not active" — and go permanently silent,
+// and the error then sits in the CLI session history and keeps poisoning
+// every resume. Never let that phrase reach an agent: rewrite it to a
+// retryable 503 whose wording cannot be misread as deactivation.
+// Detection is by error code on any 4xx, so a status change upstream can't
+// re-open the hole.
+function isSessionInactiveResult(status: number, data: unknown): boolean {
+  if (status < 400 || status >= 500) return false;
+  const code = (data as any)?.error?.code;
+  return typeof code === 'string' && code.toUpperCase() === 'SESSION_INACTIVE';
+}
+
+const SESSION_INACTIVE_REWRITE_MESSAGE =
+  'The mail platform had a transient hiccup (stale session-registration data upstream — it typically recovers within a minute). ' +
+  'This is NOT about you: your agent session is live and you are fully active. ' +
+  'Retry this exact call in about 30 seconds and continue working normally.';
+
+function rewriteSessionInactive(
+  res: Response,
+  req: Request,
+  operation: string,
+  routeLabel: string,
+): void {
+  console.warn(
+    `[mailProxy] upstream SESSION_INACTIVE on ${routeLabel} — rewriting to transient 503 so the agent does not read it as deactivation`,
+  );
+  res.status(503).json(
+    error('MAIL_UPSTREAM_TRANSIENT', SESSION_INACTIVE_REWRITE_MESSAGE, operation, (req as any).requestId)
+  );
+}
+
 function sendProxyError(res: Response, req: Request, err: any, operation: string): void {
   if (err instanceof NotAuthenticatedError) {
     res.status(401).json(
@@ -311,6 +345,11 @@ export default function mailProxyRoutes(
       }
       const result = await proxyToCloud(cfg, `/messages/${req.params.message_id}`, 'GET', query);
 
+      if (isSessionInactiveResult(result.status, result.data)) {
+        rewriteSessionInactive(res, req, 'mail_read', `messages/${req.params.message_id}`);
+        return;
+      }
+
       // Strip experimental ActionPanel fields that never shipped (BAPert 1369).
       // The actions array was an adopted spec that didn't get functional UI
       // support; agents see them in JSON but can't execute them. Remove so
@@ -385,6 +424,10 @@ export default function mailProxyRoutes(
 
       // Proxy to cloud
       const cloudResult = await proxyToCloud(cfg, '/send', 'POST', undefined, forwardBody);
+      if (isSessionInactiveResult(cloudResult.status, cloudResult.data)) {
+        rewriteSessionInactive(res, req, 'mail_send', `send from=${from_agent}`);
+        return;
+      }
       res.status(cloudResult.status).json(cloudResult.data);
 
       // Post-send hooks
@@ -408,6 +451,10 @@ export default function mailProxyRoutes(
   router.post('/inbox/:inbox_id/read', async (req: Request, res: Response) => {
     try {
       const result = await proxyToCloud(cfg, `/inbox/${req.params.inbox_id}/read`, 'POST');
+      if (isSessionInactiveResult(result.status, result.data)) {
+        rewriteSessionInactive(res, req, 'mail_mark_read', `inbox/${req.params.inbox_id}/read`);
+        return;
+      }
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_mark_read');
@@ -427,6 +474,10 @@ export default function mailProxyRoutes(
       const query: Record<string, any> = {};
       if (projectId != null) query.project_id = projectId;   // clear ONLY the current project's mail
       const result = await proxyToCloud(cfg, `/inbox/${agentName}/read-all`, 'POST', query);
+      if (isSessionInactiveResult(result.status, result.data)) {
+        rewriteSessionInactive(res, req, 'mail_mark_all_read', `inbox/${agentName}/read-all`);
+        return;
+      }
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_mark_all_read');
