@@ -122,10 +122,12 @@ describe('sseStream', () => {
     expect(events.some((e) => e.event === 'agent-output')).toBe(false);
   });
 
-  it('emits reconnect catch-up lines before live events', async () => {
-    // This test verifies the route shape; full catch-up behavior is covered in agentOutputStore tests.
+  it('emits connected event and no local catch-up', async () => {
+    // Local catch-up has been removed; the renderer sources catch-up from
+    // PayEzVibe API GET /v1/agent-output/stream?since=...
     const promise = collectStream(`${baseUrl}?project_id=p1&since=2026-07-03T10:00:00.000Z`);
     const body = await promise;
     expect(body).toContain('event: connected');
+    expect(body).not.toContain('event: agent-output');
   });
 });

@@ -8,10 +8,24 @@ import { type NormalizedAgent } from '../team/mapper.js';
 
 // v1.6 (Jon directive 2026-05-16): upstream /v1/agents/startup-config
 // returns duplicate agent_profiles rows from vibe.documents. Switched to
-// /v1/projects/:id/team which pulls from vibe_projects.project_team_members
-// and returns exactly one row per agent. Same cache key (userId, projectId).
+// /v1/projects/:id/team — which since the live-team merge (2026-07) returns
+// the project's LIVE roster: its engaged standing team's agent instances
+// (team_agent_instances), exactly one row per member. No engagement → empty
+// roster, HTTP 200, NOT an error. Same cache key (userId, projectId).
 const PROJECT_TEAM_PATH = '/v1/projects';
 const PROXY_TIMEOUT_MS = 10_000;
+
+/**
+ * ACP-3 (live-team merge 2026-07) — distinct signal returned by the roster
+ * resolvers (resolveAgentId / resolveMemberEffort / resolveMemberModel) when
+ * the project's live roster read succeeds but comes back EMPTY (no team
+ * engaged) or the named agent isn't on it. Lifecycle consumers must surface
+ * this as HTTP 409 ENGAGEMENT_REQUIRED and never default-spawn. `undefined`
+ * keeps its old meaning: no session / fetch failure / override unset → the
+ * caller defers to its usual default.
+ */
+export const ENGAGEMENT_REQUIRED: unique symbol = Symbol('ENGAGEMENT_REQUIRED');
+export type EngagementRequired = typeof ENGAGEMENT_REQUIRED;
 
 class NotAuthenticatedError extends Error {
   constructor() {
@@ -44,7 +58,8 @@ interface CloudFetchFailure {
 
 async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<CloudFetchResult | CloudFetchFailure> {
   // GET /v1/projects/:id/team — canonical project-scoped team read.
-  // Returns one row per agent from project_team_members (no doc-store dupes).
+  // Returns one row per member of the engaged standing team (live read; an
+  // empty array = no team engaged — valid, not an error).
   const signedPath = `${PROJECT_TEAM_PATH}/${projectId}/team`;
   const url = `${cfg.vibeApiUrl}${signedPath}`;
 
@@ -104,7 +119,7 @@ async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<Cloud
       isActive: true,
       rolePreset: m.canonical_role || m.role || undefined,
       isCoordinator: m.is_lead === true,
-      // project_team_members doesn't carry these; grid falls back gracefully
+      // the team-instance read doesn't carry these; grid falls back gracefully
       startupOrder: undefined,
       expertiseTags: undefined,
     }));
@@ -113,8 +128,9 @@ async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<Cloud
 }
 
 /**
- * #16b — resolve a single team member's effort_override FRESH from the DB
- * (vibe_projects.project_team_members via vibe-api) at agent respawn.
+ * #16b — resolve a single team member's effort_override FRESH from the
+ * project's LIVE roster (its engaged standing team's team_agent_instances
+ * row, via vibe-api) at agent respawn.
  *
  * ONE source of truth, always current: a backoff-state cache of the effort
  * VALUE would drift if the user edits effort during the crash/backoff window
@@ -122,20 +138,27 @@ async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<Cloud
  * restart must respawn at MEDIUM). This does a fresh authoritative read every
  * time (no teamCache — that has a 60s TTL and could also be stale).
  *
- * Returns the narrowed effort, or undefined when: unknown agent, no override
+ * Returns the narrowed effort; ENGAGEMENT_REQUIRED when the roster read
+ * succeeds but is empty (no team engaged) or the agent isn't on it (ACP-3 —
+ * the caller must 409, never default-spawn); or undefined when: no override
  * (null), no active session, or any fetch failure. undefined -> the caller
  * OMITS effort -> the single spawn resolver defers to the global default.
  * Never substitutes 'high' here (Aurum 1413: one resolver owns 'high').
  */
 /**
- * Resolve a team member's numeric agent_id from the canonical project team.
- * Mirrors resolveMemberEffort/resolveTeamRuntime: always authoritative, no cache.
+ * Resolve a team member's numeric agent_id from the project's LIVE roster
+ * (its engaged standing team). Mirrors resolveMemberEffort/resolveTeamRuntime:
+ * always authoritative, no cache.
+ *
+ * Returns ENGAGEMENT_REQUIRED when the roster read succeeds but is empty (no
+ * team engaged) or the agent isn't on it — the caller must fail loud (409),
+ * never default-spawn. undefined = no session / fetch failure (defer).
  */
 export async function resolveAgentId(
   cfg: Config,
   projectId: number,
   agentName: string,
-): Promise<number | undefined> {
+): Promise<number | undefined | EngagementRequired> {
   const signedPath = `${PROJECT_TEAM_PATH}/${projectId}/team`;
   const url = `${cfg.vibeApiUrl}${signedPath}`;
   let token = await ensureValidToken(cfg.idpUrl);
@@ -165,8 +188,10 @@ export async function resolveAgentId(
     if (attempt.status < 200 || attempt.status >= 300) return undefined;
     const team = attempt.body?.data?.team;
     if (!Array.isArray(team)) return undefined;
+    if (team.length === 0) return ENGAGEMENT_REQUIRED;
     const member = team.find((m: any) => m && m.agent_name === agentName);
-    return typeof member?.agent_id === 'number' ? member.agent_id : undefined;
+    if (!member) return ENGAGEMENT_REQUIRED;
+    return typeof member.agent_id === 'number' ? member.agent_id : undefined;
   } catch {
     return undefined;
   }
@@ -176,7 +201,7 @@ export async function resolveMemberEffort(
   cfg: Config,
   projectId: number,
   agentName: string,
-): Promise<'low' | 'medium' | 'high' | 'max' | undefined> {
+): Promise<'low' | 'medium' | 'high' | 'max' | undefined | EngagementRequired> {
   const signedPath = `${PROJECT_TEAM_PATH}/${projectId}/team`;
   const url = `${cfg.vibeApiUrl}${signedPath}`;
   let token = await ensureValidToken(cfg.idpUrl);
@@ -206,8 +231,10 @@ export async function resolveMemberEffort(
     if (attempt.status < 200 || attempt.status >= 300) return undefined;
     const team = attempt.body?.data?.team;
     if (!Array.isArray(team)) return undefined;
+    if (team.length === 0) return ENGAGEMENT_REQUIRED;
     const member = team.find((m: any) => m && m.agent_name === agentName);
-    const e = member?.effort_override;
+    if (!member) return ENGAGEMENT_REQUIRED;
+    const e = member.effort_override;
     return (e === 'low' || e === 'medium' || e === 'high' || e === 'max') ? e : undefined;
   } catch {
     return undefined;
@@ -221,12 +248,14 @@ export async function resolveMemberEffort(
  * modelOverride === 'k3' — losing the model silently loses the effort too).
  * Never narrowed here: the spawn boundary (KIMI_MODEL_ALIASES) is the
  * fail-loud authority on unknown ids; undefined = inherit the CLI default.
+ * ENGAGEMENT_REQUIRED when the live roster read succeeds but is empty (no
+ * team engaged) or the agent isn't on it (ACP-3 — caller must 409).
  */
 export async function resolveMemberModel(
   cfg: Config,
   projectId: number,
   agentName: string,
-): Promise<string | undefined> {
+): Promise<string | undefined | EngagementRequired> {
   const signedPath = `${PROJECT_TEAM_PATH}/${projectId}/team`;
   const url = `${cfg.vibeApiUrl}${signedPath}`;
   let token = await ensureValidToken(cfg.idpUrl);
@@ -256,8 +285,10 @@ export async function resolveMemberModel(
     if (attempt.status < 200 || attempt.status >= 300) return undefined;
     const team = attempt.body?.data?.team;
     if (!Array.isArray(team)) return undefined;
+    if (team.length === 0) return ENGAGEMENT_REQUIRED;
     const member = team.find((m: any) => m && m.agent_name === agentName);
-    const m = member?.model_override;
+    if (!member) return ENGAGEMENT_REQUIRED;
+    const m = member.model_override;
     return (typeof m === 'string' && m.trim()) ? m.trim() : undefined;
   } catch {
     return undefined;

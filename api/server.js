@@ -21,14 +21,14 @@ import notificationRoutes from './routes/notifications.js';
 import { PartyEngine } from '../collaboration/party_engine.js';
 import { UpstreamSignalRManager } from './sse/upstreamSignalRManager.js';
 import sseStreamRoutes from './routes/sseStream.js';
+import terminalReplayRoutes from './routes/terminalReplay.js';
 import { BackoffManager } from './lifecycle/backoff.js';
 import { HealthMonitor } from './lifecycle/healthMonitor.js';
+import { makeCrashRestartScheduler } from './lifecycle/crashRestart.js';
 import agentLifecycleRoutes from './routes/agentLifecycle.js';
-import { resolveMemberEffort, resolveMemberModel, resolveTeamRuntime } from './routes/team.js';
 import { bootstrap } from '../core/bootstrap.js';
 import { LocalEventBus } from './sse/localEventBus.js';
 import { TerminalOutputBridge } from './terminal/terminalOutputBridge.js';
-import { AgentOutputStore, resolveTier } from './terminal/agentOutputStore.js';
 import { LifecycleHooks } from './lifecycle/hooks.js';
 import { Supervisor } from '../autonomy/supervisor.js';
 import { logger, setLogLevel, requestLogger } from './logging/logger.js';
@@ -43,6 +43,7 @@ import documentRoutes from './routes/documents.js';
 import { AgentDocumentStore } from './storage/agentDocumentStore.js';
 import agentRoutes from './routes/agents.js';
 import teamRoutes from './routes/team.js';
+import teamsRoutes from './routes/teams.js';
 import cliProxyRoutes from './routes/cliProxy.js';
 import authRoutes from './routes/auth.js';
 import authDiagRoutes from './routes/authDiag.js';
@@ -130,9 +131,9 @@ export async function createApp(cfg) {
   // Local event bus for party/autonomy SSE events
   const localEventBus = new LocalEventBus();
 
-  // Terminal output bridge: raw PTY output -> normalized SSE agent-output events
-  const agentOutputStore = new AgentOutputStore();
-  const terminalOutputBridge = new TerminalOutputBridge(localEventBus, agentOutputStore);
+  // Terminal output bridge: raw PTY output -> normalized SSE agent-output events.
+  // No local storage; the desktop posts directly to PayEzVibe API /v1/agent-output.
+  const terminalOutputBridge = new TerminalOutputBridge(localEventBus);
   terminalOutputBridge.startPeriodicFlush();
 
   // WO-1 Deliverable C seam: sidecar = SOLE terminal-dead authority (§9
@@ -177,7 +178,11 @@ export async function createApp(cfg) {
   // SignalR upstream (mail from cloud) → local SSE downstream fan-out.
   // Replaces per-agent cloud SSE: SignalR + Redis backplane survives multi-pod.
   const upstreamSse = new UpstreamSignalRManager(appConfig);
-  app.use('/v1/sse', sseStreamRoutes(upstreamSse, localEventBus, agentOutputStore));
+  app.use('/v1/sse', sseStreamRoutes(upstreamSse, localEventBus));
+
+  // Terminal replay API — proxies /v1/terminal/replay to PayEzVibe API
+  // GET /v1/agent-output/history; aggregates /sessions and /export locally.
+  app.use('/v1/terminal', terminalReplayRoutes(appConfig));
 
   // WO-1 Deliverable D §5.6 — queryable [AuthRC] ring-buffer surface.
   // Authenticated (mounted after localAuth) — renderer/diagnostics only.
@@ -187,55 +192,12 @@ export async function createApp(cfg) {
   const backoffManager = new BackoffManager();
   const callbackPort = appConfig.acpCallbackPort;
 
-  const scheduleRestart = (agentName, delay) => {
-    const state = backoffManager.getOrCreate(agentName);
-    state.restartTimer = setTimeout(async () => {
-      try {
-        const { session } = await bootstrap(sessionManager, agentName);
-        // #16b: re-resolve effort FRESH from the DB at crash auto-restart
-        // (Aurum 1421 — a cached value drifts if effort was edited during the
-        // crash/backoff window; the drift test demands the CURRENT DB value).
-        // Defers to the global resolver if no project ctx / no active session.
-        const freshEffort = state.projectId != null
-          ? await resolveMemberEffort(appConfig, state.projectId, agentName)
-          : undefined;
-        // WO #84135 §3.1/§2.3 (sibling of the /restart route fix): re-resolve
-        // the TEAM runtime FRESH too — symmetry with freshEffort. Without it
-        // this crash auto-restart OMITTED runtime, so Electron fell to the
-        // global agentProvider and a kimi team's crash-looped agent came back
-        // claude. Omit when unresolved (no project ctx / no session / unset).
-        const freshRuntime = state.projectId != null
-          ? await resolveTeamRuntime(appConfig, state.projectId)
-          : undefined;
-        // WO 11469 (b): re-resolve model_override FRESH as well — a restarted
-        // kimi agent must keep its -m alias AND its k3 effort env.
-        const freshModel = state.projectId != null
-          ? await resolveMemberModel(appConfig, state.projectId, agentName)
-          : undefined;
-        const result = await fetch(`http://127.0.0.1:${callbackPort}/internal/pty/spawn`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${appConfig.acpLocalSecret}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(freshEffort ? { effort: freshEffort } : {}), ...(freshRuntime ? { runtime: freshRuntime } : {}), ...(freshModel ? { model: freshModel } : {}) }),
-        });
-        if (result.ok) {
-          const data = await result.json();
-          const terminalId = data?.terminalId || data?.data?.terminalId || '';
-          state.provider = freshRuntime || null;
-          backoffManager.markSpawned(agentName, terminalId, session.sessionId || '', state.provider);
-          console.log(`[Lifecycle] ${agentName}: auto-restarted successfully`);
-        } else {
-          state.status = 'error';
-          console.error(`[Lifecycle] ${agentName}: auto-restart failed (HTTP ${result.status})`);
-        }
-      } catch (err) {
-        state.status = 'error';
-        console.error(`[Lifecycle] ${agentName}: auto-restart failed: ${err.message}`);
-      }
-    }, delay);
-  };
+  const scheduleRestart = makeCrashRestartScheduler({
+    cfg: appConfig,
+    backoff: backoffManager,
+    callbackPort,
+    bootstrap: (name) => bootstrap(sessionManager, name),
+  });
 
   const healthMonitor = new HealthMonitor(appConfig, backoffManager, callbackPort, scheduleRestart);
 
@@ -263,9 +225,49 @@ export async function createApp(cfg) {
     }, 'pty_exit', req.requestId));
   });
 
-  // Internal PTY output route — raw chunks from acp-desktop -> normalized SSE + storage
-  // Per BAPert #10522, project_id and session_id are resolved server-side from the
-  // agent's lifecycle state; the desktop payload is not trusted for scoping.
+  // Internal PTY register route — seed sidecar BackoffManager state for agents
+  // spawned directly by acp-desktop (e.g., spawn-orchestrator) without going
+  // through /v1/lifecycle/agents/:name/spawn. Without this registration,
+  // /internal/pty/output cannot resolve project_id/session_id and the local
+  // replay cache stays empty.
+  app.post('/internal/pty/register', async (req, res) => {
+    const { agentName, terminalId, projectId, provider } = req.body || {};
+    if (!agentName || !terminalId || projectId === undefined || projectId === null) {
+      return res.status(400).json(error('INVALID_REQUEST', 'agentName, terminalId, and projectId required', 'pty_register', req.requestId));
+    }
+    const resolvedProjectId = typeof projectId === 'number' ? projectId : Number(projectId);
+    if (!Number.isFinite(resolvedProjectId)) {
+      return res.status(400).json(error('INVALID_REQUEST', 'projectId must be a number', 'pty_register', req.requestId));
+    }
+
+    try {
+      // Bootstrap (or reuse) the local ACP session — same session authority as
+      // /v1/lifecycle/agents/:name/spawn so /internal/pty/output resolves a
+      // consistent session_id.
+      const { session } = await bootstrap(sessionManager, agentName);
+
+      const state = backoffManager.getOrCreate(agentName);
+      state.projectId = resolvedProjectId;
+      backoffManager.markSpawned(agentName, terminalId, session.sessionId, provider || null);
+
+      res.json(success({
+        agent_name: agentName,
+        terminal_id: terminalId,
+        session_id: session.sessionId,
+        project_id: resolvedProjectId,
+        provider: state.provider,
+      }, 'pty_register', req.requestId));
+    } catch (err) {
+      console.error('[PTY Register] failed to seed lifecycle state:', err);
+      res.status(500).json(error('REGISTER_FAILED', 'Failed to seed agent lifecycle state', 'pty_register', req.requestId));
+    }
+  });
+
+  // Internal PTY output route — raw chunks from acp-desktop -> normalized SSE.
+  // No local storage; the desktop already posts scrubbed output directly to
+  // PayEzVibe API /v1/agent-output. project_id and session_id are resolved
+  // server-side from the agent's lifecycle state; the desktop payload is not
+  // trusted for scoping.
   app.post('/internal/pty/output', async (req, res) => {
     const { agentName, terminalId, data, provider } = req.body || {};
     if (!agentName || !terminalId || typeof data !== 'string') {
@@ -313,6 +315,9 @@ export async function createApp(cfg) {
   // Team sync — soft-cached proxy of vibe-publicapi /v1/agentmail/agents?type=team.
   // Spec: idealvibe-phase1-acp-team-sync-spec-v1.md §6
   app.use('/v1/team', teamRoutes(appConfig));
+  // Standing-team proxy (live-team model) — ACP-1 picker source + ACP-6 team
+  // editor surface. Canonical prefix /v1/teams → cloud /v1/teams.
+  app.use('/v1/teams', teamsRoutes(appConfig));
   // Agent profile lookup (minimal - full management in acp-api-noaccount)
   app.use('/v1/agents', agentRoutes(storage));
 

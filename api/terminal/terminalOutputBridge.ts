@@ -24,7 +24,6 @@
 
 import { scrubOutput, buildDefaultScrubContext } from '../contractors/outputScrubber.js';
 import type { LocalEventBus } from '../sse/localEventBus.js';
-import type { AgentOutputStore, StoredAgentOutputLine } from './agentOutputStore.js';
 
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
 const CRLF_RE = /\r\n/g;
@@ -52,7 +51,6 @@ interface TokenBucket {
 
 export class TerminalOutputBridge {
   private bus: LocalEventBus;
-  private store: AgentOutputStore | null;
   private buffers = new Map<string, string>();
   private lastActivity = new Map<string, number>();
   private scrubCtx = buildDefaultScrubContext();
@@ -65,9 +63,8 @@ export class TerminalOutputBridge {
 
   private invalidInputCount = 0;
 
-  constructor(bus: LocalEventBus, store?: AgentOutputStore) {
+  constructor(bus: LocalEventBus) {
     this.bus = bus;
-    this.store = store || null;
   }
 
   /**
@@ -202,24 +199,6 @@ export class TerminalOutputBridge {
         ...(projectId ? { project_id: projectId } : {}),
       };
       this.bus.emitAgentOutput(payload as unknown as Record<string, unknown>);
-
-      if (this.store && projectId) {
-        try {
-          const stored: StoredAgentOutputLine = {
-            project_id: projectId,
-            session_id: sessionId || 'unknown',
-            agent: agentName,
-            terminal_id: terminalId,
-            provider: provider || 'unknown',
-            line,
-            ts,
-          };
-          this.store.write(stored);
-        } catch (err) {
-          // Storage failure must not break the live SSE stream.
-          console.warn(`[TerminalOutputBridge] Storage write failed for ${agentName}:`, err);
-        }
-      }
     }
   }
 

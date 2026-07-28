@@ -646,11 +646,19 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
     }
   });
 
-  // PUT /v1/projects/:id/team/:agent_id — proxy team-member override
-  // writeback. Body subset of: role, runtime_override, work_dir_override,
-  // position_hint, is_lead. Cloud validates enums (400 INVALID_RUNTIME /
-  // INVALID_POSITION_HINT) and owner-or-admin authz (403). Field-omit +
-  // explicit-null both = keep current per DotNetPert msg 987.
+  // PUT /v1/projects/:id/team/:agent_id — OVERRIDES-ONLY writeback against
+  // the member's slot on the engaged team (live-team model). This is NOT a
+  // membership add/edit — roster membership is edited on the standing team
+  // (/v1/teams, see teams.ts) and projects reflect it live.
+  // Whitelisted body keys: role (maps to role_preset), runtime_override,
+  // effort_override, model_override, work_dir_override, position_hint,
+  // is_lead. Everything else is dropped, never forwarded.
+  // Tri-state per key (cloud-enforced): absent = keep current, explicit
+  // null = clear-to-inherit, blank = 400. Cloud 400s flow through verbatim.
+  const TEAM_OVERRIDE_KEYS = [
+    'role', 'runtime_override', 'effort_override', 'model_override',
+    'work_dir_override', 'position_hint', 'is_lead',
+  ] as const;
   router.put('/:id/team/:agent_id', async (req: Request, res: Response) => {
     try {
       const session = getSession();
@@ -662,7 +670,15 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
         return;
       }
 
-      const { status, payload } = await callCloud(cfg, 'PUT', `${CLOUD_PROJECTS_PATH}/${id}/team/${agentId}`, undefined, req.body || {});
+      // Whitelist — only the override contract reaches cloud. `key in body`
+      // (not truthiness) so explicit null (clear-to-inherit) is preserved.
+      const body = (req.body || {}) as Record<string, unknown>;
+      const forward: Record<string, unknown> = {};
+      for (const k of TEAM_OVERRIDE_KEYS) {
+        if (k in body) forward[k] = body[k];
+      }
+
+      const { status, payload } = await callCloud(cfg, 'PUT', `${CLOUD_PROJECTS_PATH}/${id}/team/${agentId}`, undefined, forward);
 
       if (status === 400 || status === 403 || status === 404) {
         const upstreamError = (payload as any)?.error ?? {};
@@ -677,8 +693,9 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
         return;
       }
 
-      // Team membership shape changed for this project — clear all cached
-      // copies (any user who fetched this project's team has stale data).
+      // An overrides write changed this member's slot on the engaged team —
+      // clear cached roster copies so the next GET re-reads it live (any
+      // user who fetched this project's team has stale data).
       cache.team.clear(undefined, id);
 
       const teamMember = extractTeamMemberEcho(payload);
@@ -688,106 +705,69 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
     }
   });
 
-  // POST /v1/projects/:id/team — add agent to project's team. Body
-  // `{ agent_id }`. Mirrors DotNetPert msg 1078 cloud surface (image
-  // f7045b2ff2df on vibe-publicapi_rosa:32786). Vital-thing add path
-  // for idealvibe-web's TeamMembershipModal; acp-desktop currently
-  // read-only via Ship D drawer but proxy lives here for desktop-side
-  // parity (Wave C/D may consume).
-  //   201 → { team_member }
-  //   409 ALREADY_MEMBER if agent_id already on team
-  //   404 AGENT_NOT_FOUND if agent_id doesn't exist in canonical roster
-  //   400 VALIDATION_ERROR on missing/non-integer agent_id
-  //   403 PROJECT_FORBIDDEN for non-owner/admin callers
-  router.post('/:id/team', async (req: Request, res: Response) => {
+  // POST /v1/projects/:id/teams — ENGAGE a standing team onto this project
+  // (live-team model; the ONLY way a project gets a roster). Body
+  // `{ team_id }`; `?confirm=true` forwards to cloud for the consent-gated
+  // swap. Cloud answers 409 ENGAGE_CONFIRM_REQUIRED (carrying current_team /
+  // incoming_team / lost_overrides) when re-engaging over an existing team
+  // without confirm — that body is passed through VERBATIM (unwrapped, NOT
+  // the acp-api envelope) because the renderer's consent dialog reads it,
+  // matching the proxyStandup verbatim contract. Every other status passes
+  // through the same way.
+  router.post('/:id/teams', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const userId = session.userId || '0';
+      const id = parseInt(req.params.id as string, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_teams_engage', (req as any).requestId));
+        return;
+      }
+      const teamId = (req.body || {}).team_id;
+      if (typeof teamId !== 'number' || !Number.isFinite(teamId)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'team_id must be a number (integer) in the request body', 'project_teams_engage', (req as any).requestId));
+        return;
+      }
+
+      const { status, payload } = await callCloud(
+        cfg, 'POST', `${CLOUD_PROJECTS_PATH}/${id}/teams`,
+        { confirm: req.query.confirm },
+        { team_id: teamId },
+      );
+
+      if (status >= 200 && status < 300) {
+        // Engagement swapped the live roster + the project DTO's
+        // engaged_team_* fields — drop cached copies so the next reads
+        // (roster, list, current) see the new team immediately.
+        cache.team.clear(undefined, id);
+        cache.list.clear(userId);
+        cache.current.clear(userId);
+      }
+
+      // VERBATIM passthrough (see header comment) — 409 body byte-for-byte.
+      res.status(status).json(payload);
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_teams_engage');
+    }
+  });
+
+  // GET /v1/projects/:id/teams — engagement read. Cloud 200s with
+  // `{ teams: [] }` when nothing is engaged (empty = unengaged, NOT an
+  // error). Verbatim passthrough.
+  router.get('/:id/teams', async (req: Request, res: Response) => {
     try {
       const session = getSession();
       if (!session) throw new NotAuthenticatedError();
       const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
-        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_team_post', (req as any).requestId));
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_teams_get', (req as any).requestId));
         return;
       }
-      const agentId = (req.body || {}).agent_id;
-      if (typeof agentId !== 'number' || !Number.isFinite(agentId)) {
-        res.status(400).json(error('VALIDATION_ERROR', 'agent_id (integer) is required in body', 'project_team_post', (req as any).requestId));
-        return;
-      }
-
-      const { status, payload } = await callCloud(cfg, 'POST', `${CLOUD_PROJECTS_PATH}/${id}/team`, undefined, { agent_id: agentId });
-
-      if (status === 400 || status === 403 || status === 404 || status === 409) {
-        const upstreamError = (payload as any)?.error ?? {};
-        const code = upstreamError.code
-          || (status === 400 ? 'VALIDATION_ERROR'
-            : status === 403 ? 'PROJECT_FORBIDDEN'
-            : status === 404 ? 'AGENT_NOT_FOUND'
-            : 'ALREADY_MEMBER');
-        const message = upstreamError.message || `Cloud returned HTTP ${status}`;
-        res.status(status).json(error(code, message, 'project_team_post', (req as any).requestId));
-        return;
-      }
-      if (status < 200 || status >= 300 || !(payload as any)?.success) {
-        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
-        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_team_post', (req as any).requestId));
-        return;
-      }
-
-      // Team membership shape changed project-wide — invalidate all cached
-      // team rosters for this project_id so the next GET fetches fresh.
-      cache.team.clear(undefined, id);
-
-      const teamMember = extractTeamMemberEcho(payload);
-      res.status(201).json(success({ team_member: teamMember }, 'project_team_post', (req as any).requestId));
+      const { status, payload } = await callCloud(cfg, 'GET', `${CLOUD_PROJECTS_PATH}/${id}/teams`);
+      res.status(status).json(payload);
     } catch (err: any) {
-      sendProxyError(res, req, err, 'project_team_post');
-    }
-  });
-
-  // DELETE /v1/projects/:id/team/:agent_id — remove agent from project.
-  // Cloud msg 1078 + msg 1080:
-  //   204 (empty)
-  //   400 CANNOT_REMOVE_LEAD if is_lead=true (FE pre-disables remove button
-  //                          for lead, this is the backstop)
-  //   404 NOT_ON_TEAM if agent isn't a current member
-  //   403 PROJECT_FORBIDDEN for non-owner/admin
-  router.delete('/:id/team/:agent_id', async (req: Request, res: Response) => {
-    try {
-      const session = getSession();
-      if (!session) throw new NotAuthenticatedError();
-      const id = parseInt(req.params.id as string, 10);
-      const agentId = parseInt(req.params.agent_id as string, 10);
-      if (isNaN(id) || isNaN(agentId)) {
-        res.status(400).json(error('VALIDATION_ERROR', 'id and agent_id must be integers', 'project_team_delete', (req as any).requestId));
-        return;
-      }
-
-      const { status, payload } = await callCloud(cfg, 'DELETE', `${CLOUD_PROJECTS_PATH}/${id}/team/${agentId}`);
-
-      if (status === 400 || status === 403 || status === 404) {
-        const upstreamError = (payload as any)?.error ?? {};
-        const code = upstreamError.code
-          || (status === 400 ? 'CANNOT_REMOVE_LEAD'
-            : status === 403 ? 'PROJECT_FORBIDDEN'
-            : 'NOT_ON_TEAM');
-        const message = upstreamError.message || `Cloud returned HTTP ${status}`;
-        res.status(status).json(error(code, message, 'project_team_delete', (req as any).requestId));
-        return;
-      }
-      // 204 No Content is also success — callCloud normalizes to status 204
-      // with null payload. Treat both 2xx + payload-may-be-null as success.
-      if (status < 200 || status >= 300) {
-        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
-        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_team_delete', (req as any).requestId));
-        return;
-      }
-
-      // Team membership shape changed project-wide — invalidate caches.
-      cache.team.clear(undefined, id);
-
-      res.status(200).json(success({}, 'project_team_delete', (req as any).requestId));
-    } catch (err: any) {
-      sendProxyError(res, req, err, 'project_team_delete');
+      sendProxyError(res, req, err, 'project_teams_get');
     }
   });
 

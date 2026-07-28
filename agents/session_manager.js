@@ -614,7 +614,7 @@ export class SessionManager {
     const seen = new Map();
     for (const board of ['active', 'done', 'waiting']) {
       const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/${board}`);
-      const tasks = res?.data?.tasks ?? res?.data ?? [];
+      const tasks = res?.data?.tasks ?? res?.data?.items ?? res?.data ?? [];
       for (const t of (Array.isArray(tasks) ? tasks : [])) {
         const mapped = this._rowToTask(t);
         if (mapped.id != null) seen.set(mapped.id, mapped);

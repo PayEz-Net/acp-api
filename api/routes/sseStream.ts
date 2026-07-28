@@ -1,7 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import type { UpstreamSseManager } from '../sse/upstreamManager.js';
 import type { LocalEventBus } from '../sse/localEventBus.js';
-import { resolveTier, type AgentOutputStore } from '../terminal/agentOutputStore.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -11,7 +10,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
  * Heartbeat every 30s to keep connection alive.
  * Receives both upstream (mail from cloud) and local (party/autonomy) events.
  */
-export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, localEventBus?: LocalEventBus, agentOutputStore?: AgentOutputStore): Router {
+export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, localEventBus?: LocalEventBus): Router {
   const router = Router();
   const clients = new Set<{
     res: Response;
@@ -97,7 +96,6 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
       : null;
 
     const projectId = req.query.project_id as string | undefined;
-    const since = req.query.since as string | undefined;
 
     // Set SSE headers
     res.writeHead(200, {
@@ -110,30 +108,10 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
     // Send initial connected event
     res.write(`event: connected\ndata: ${JSON.stringify({ status: 'connected' })}\n\n`);
 
-    // Reconnect catch-up: emit stored lines newer than `since` before attaching to live bus.
-    // If `since` is missing or older than the retention window, clamp to the window start
-    // so a fresh or long-disconnected client never receives stale data beyond the tier cap.
-    if (agentOutputStore && projectId) {
-      try {
-        const tier = resolveTier();
-        const retentionStart = new Date(Date.now() - tier.maxDays * 24 * 60 * 60 * 1000).toISOString();
-        const effectiveSince = since && since > retentionStart ? since : retentionStart;
-        const agents = agentFilter ? Array.from(agentFilter) : undefined;
-        const lines = agentOutputStore.query({ project_id: projectId, since: effectiveSince, agents });
-        for (const line of lines) {
-          const payload = JSON.stringify({
-            agent: line.agent,
-            terminal_id: line.terminal_id,
-            provider: line.provider,
-            line: line.line,
-            ts: line.ts,
-          });
-          res.write(`event: agent-output\ndata: ${payload}\n\n`);
-        }
-      } catch (err) {
-        console.warn('[SSE] Catch-up query failed:', err);
-      }
-    }
+    // Catch-up has been removed from the local sidecar. The renderer's live
+    // agent-output feed is sourced from PayEzVibe API GET /v1/agent-output/stream
+    // (see acp-desktop useVsqlCacheSse.ts), which handles reconnect catch-up via
+    // the `since` query parameter against the backend cache.
 
     const client = { res, agents: agentFilter, projectId: projectId ?? null };
     clients.add(client);

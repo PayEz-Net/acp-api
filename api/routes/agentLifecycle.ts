@@ -3,7 +3,7 @@ import { success, error } from '../response.js';
 import type { BackoffManager } from '../lifecycle/backoff.js';
 import type { HealthMonitor } from '../lifecycle/healthMonitor.js';
 import type { Config } from '../../config.js';
-import { resolveAgentId, resolveMemberEffort, resolveMemberModel, resolveTeamRuntime } from './team.js';
+import { resolveAgentId, resolveMemberEffort, resolveMemberModel, resolveTeamRuntime, ENGAGEMENT_REQUIRED } from './team.js';
 
 interface LifecycleDeps {
   cfg: Config;
@@ -14,16 +14,22 @@ interface LifecycleDeps {
 }
 
 const CALLBACK_TIMEOUT_MS = 10_000;
+// Spawn is slow: the Electron handler only responds after the CLI process is
+// up AND the ACP initialize + session/resume round-trips complete. Cold start
+// observed at ~11.5s — 10s 502s the request while the spawn actually succeeds
+// seconds later, leaving a stale 'error' status on a healthy pane.
+const SPAWN_CALLBACK_TIMEOUT_MS = 60_000;
 
 async function callElectron(
   cfg: Config,
   callbackPort: number,
   path: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  timeoutMs: number = CALLBACK_TIMEOUT_MS
 ): Promise<{ status: number; data: any }> {
   const url = `http://127.0.0.1:${callbackPort}${path}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CALLBACK_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(url, {
@@ -91,10 +97,30 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       const { session } = await bootstrap(name);
 
       // Resolve the canonical agent_id so the Electron side can start a
-      // PayEzVibe agent_session for the stream endpoint.
+      // PayEzVibe agent_session for the stream endpoint. The roster read
+      // doubles as the ENGAGEMENT check (ACP-3) — it runs even when the
+      // caller passed an explicit numeric agentId, so an explicit id can
+      // never bypass the fail-loud path on an unengaged project.
+      const rosterAgentId = state.projectId != null
+        ? await resolveAgentId(cfg, state.projectId, name)
+        : undefined;
+
+      // ACP-3 (live-team merge): the roster read succeeded but is EMPTY (or
+      // this agent isn't on it) = no team engaged on the project. Fail loud
+      // with 409 — never default-spawn a silently-resolved identity.
+      if (rosterAgentId === ENGAGEMENT_REQUIRED) {
+        state.status = 'error';
+        res.status(409).json(
+          error('ENGAGEMENT_REQUIRED', `No team engaged on project ${state.projectId} — engage a team first`, 'agent_spawn', (req as any).requestId)
+        );
+        return;
+      }
+
+      // Explicit caller-supplied id keeps precedence (unchanged contract);
+      // otherwise use the roster-resolved id.
       const agentId = typeof req.body?.agentId === 'number'
         ? req.body.agentId
-        : (state.projectId != null ? await resolveAgentId(cfg, state.projectId, name) : undefined);
+        : rosterAgentId;
 
       // Call Electron to spawn PTY
       const result = await callElectron(cfg, callbackPort, '/internal/pty/spawn', {
@@ -106,7 +132,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
         ...(validRuntime ? { runtime: validRuntime } : {}),
         ...(validEffort ? { effort: validEffort } : {}),
         ...(validModel ? { model: validModel } : {}),
-      });
+      }, SPAWN_CALLBACK_TIMEOUT_MS);
 
       // 409 = agent already running — reuse existing terminalId
       if (result.status === 409) {
@@ -203,28 +229,13 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
 
     try {
       const state = backoff.getOrCreate(name);
-      backoff.markManualRestart(name);
-
-      // Kill if running
-      if (state.terminalId) {
-        try {
-          await callElectron(cfg, callbackPort, '/internal/pty/kill', {
-            agentName: name,
-            terminalId: state.terminalId,
-          });
-        } catch {
-          // Kill failure is non-fatal for restart
-        }
-        state.terminalId = null;
-      }
-
-      // Bootstrap session
-      const { session } = await bootstrap(name);
 
       // #16b: re-resolve effort FRESH from the DB at respawn (Aurum 1421 —
       // a cached value drifts if the user edited effort during the window;
       // the drift test demands the CURRENT DB value). Defers to the global
       // resolver when there's no project ctx / no active session.
+      // ACP-3: resolution happens BEFORE the kill below so an
+      // ENGAGEMENT_REQUIRED abort leaves a running agent untouched.
       const freshEffort = state.projectId != null
         ? await resolveMemberEffort(cfg, state.projectId, name)
         : undefined;
@@ -249,6 +260,35 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
         ? await resolveMemberModel(cfg, state.projectId, name)
         : undefined;
 
+      // ACP-3 (live-team merge): empty live roster (or agent not on it) = no
+      // team engaged on the project — fail loud with 409, never default-spawn.
+      if (freshEffort === ENGAGEMENT_REQUIRED || freshAgentId === ENGAGEMENT_REQUIRED || freshModel === ENGAGEMENT_REQUIRED) {
+        res.status(409).json(
+          error('ENGAGEMENT_REQUIRED', `No team engaged on project ${state.projectId} — engage a team first`, 'agent_restart', (req as any).requestId)
+        );
+        return;
+      }
+
+      // Only NOW mutate lifecycle state: an aborted restart above leaves no
+      // trace (status stays whatever it was — never a phantom 'spawning').
+      backoff.markManualRestart(name);
+
+      // Kill if running
+      if (state.terminalId) {
+        try {
+          await callElectron(cfg, callbackPort, '/internal/pty/kill', {
+            agentName: name,
+            terminalId: state.terminalId,
+          });
+        } catch {
+          // Kill failure is non-fatal for restart
+        }
+        state.terminalId = null;
+      }
+
+      // Bootstrap session
+      const { session } = await bootstrap(name);
+
       const result = await callElectron(cfg, callbackPort, '/internal/pty/spawn', {
         agentName: name,
         workDir: state.workDir || undefined,
@@ -258,7 +298,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
         ...(freshEffort ? { effort: freshEffort } : {}),
         ...(freshRuntime ? { runtime: freshRuntime } : {}),
         ...(freshModel ? { model: freshModel } : {}),
-      });
+      }, SPAWN_CALLBACK_TIMEOUT_MS);
 
       if (result.status !== 200) {
         state.status = 'error';

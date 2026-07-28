@@ -55,6 +55,12 @@ export interface CloudProjectDto {
   stack_topology: string | null;
   compliance: unknown[] | null;
   advisor_output: unknown | null;
+  // Live-team engagement (PayEz-Core live-team merge 2026-07): the engaged
+  // standing team's id/name, null when unengaged. is_complete = a team is
+  // engaged with exactly one lead (server-derived 8-field gate).
+  engaged_team_id: number | null;
+  engaged_team_name: string | null;
+  is_complete: boolean;
 }
 
 export interface CloudProjectMemberDto {
@@ -68,10 +74,13 @@ export interface CloudProjectMemberDto {
 }
 
 /**
- * Cloud `ProjectTeamMemberDto` (Wave A `vibe_projects.project_team_members`,
- * joined with `vibe_agents.agents` on agent_id) — per-project agent record
- * with override fields. Distinct from `CloudProjectMemberDto` which is
- * people-membership; this is the agent-team record.
+ * Cloud `ProjectTeamMemberDto` — one row of the project's LIVE roster, i.e.
+ * a member of its engaged standing team (cloud reads the team's
+ * `team_agent_instances` live for `GET /v1/projects/:id/team`; per-placement
+ * overrides live on the team instance and follow the team across projects).
+ * Distinct from `CloudProjectMemberDto` which is people-membership; this is
+ * the agent-team record. An empty roster means NO team engaged — 200, not
+ * an error.
  */
 export interface CloudProjectTeamMemberDto {
   agent_id: number;
@@ -126,6 +135,11 @@ export interface MappedProject {
   stack_topology: string | null;
   compliance: unknown[] | null;
   advisor_output: unknown | null;
+  // Live-team engagement — null id/name when unengaged (fresh projects have
+  // NO team until EngageTeam); is_complete per the server-side gate.
+  engaged_team_id: number | null;
+  engaged_team_name: string | null;
+  is_complete: boolean;
 }
 
 export function mapCloudProject(p: CloudProjectDto): MappedProject {
@@ -154,6 +168,10 @@ export function mapCloudProject(p: CloudProjectDto): MappedProject {
     stack_topology: p.stack_topology ?? null,
     compliance: Array.isArray(p.compliance) ? p.compliance : null,
     advisor_output: p.advisor_output ?? null,
+    // Live-team engagement (null when unengaged; absent on older payloads → null/false)
+    engaged_team_id: p.engaged_team_id ?? null,
+    engaged_team_name: p.engaged_team_name ?? null,
+    is_complete: p.is_complete === true,
   };
 }
 
