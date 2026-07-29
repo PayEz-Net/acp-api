@@ -24,6 +24,8 @@ function b64url(o) {
 const cfg = { idpUrl: 'http://idp.test', vibeApiUrl: 'http://cloud.test', acpLocalSecret: 'secret' };
 
 const realFetch = globalThis.fetch;
+let spawnStatus = 200;
+let spawnBody = { terminalId: 't-crash-1' };
 let spawnBodies = [];
 let roster = [];
 
@@ -54,6 +56,8 @@ beforeAll(() => {
 
 beforeEach(() => {
   spawnBodies = [];
+  spawnStatus = 200;
+  spawnBody = { terminalId: 't-crash-1' };
   roster = []; // default: UNENGAGED project (empty live roster)
   globalThis.fetch = async (url, opts) => {
     const u = String(url);
@@ -70,7 +74,7 @@ beforeEach(() => {
     }
     if (u.endsWith('/internal/pty/spawn')) {
       spawnBodies.push(JSON.parse(opts.body));
-      return new Response(JSON.stringify({ terminalId: 't-crash-1' }), { status: 200 });
+      return new Response(JSON.stringify(spawnBody), { status: spawnStatus });
     }
     throw new Error(`unexpected fetch: ${u}`);
   };
@@ -120,5 +124,45 @@ describe('ACP-3: crash auto-restart on an engaged project (unchanged)', () => {
     expect(spawnBodies[0].runtime).toBe('kimi');
     expect(st.status).toBe('ready');
     expect(st.terminalId).toBe('t-crash-1');
+  });
+});
+
+describe('409 on crash auto-restart = already running, NOT an error', () => {
+  // Observed 2026-07-29: a pane was respawned successfully by another path and
+  // then flagged status='error' by this redundant attempt losing the race. A 409
+  // means "your job is already done"; reporting a healthy agent as errored also
+  // poisons the state a later crash check reads.
+  test("adopts the winner's terminal and leaves status healthy", async () => {
+    roster = [{ agent_id: 3, agent_name: 'NextPert', effort_override: 'high' }];
+    spawnStatus = 409;
+    spawnBody = { terminalId: 't-winner-9' };
+    const backoff = new BackoffManager();
+    const st = seededState(backoff);
+    makeScheduler(backoff)('NextPert', 0);
+    await settle();
+    expect(st.status).not.toBe('error');
+    expect(st.terminalId).toBe('t-winner-9');
+  });
+
+  test('a 409 with no body still does not mark error', async () => {
+    roster = [{ agent_id: 3, agent_name: 'NextPert', effort_override: 'high' }];
+    spawnStatus = 409;
+    spawnBody = {};
+    const backoff = new BackoffManager();
+    const st = seededState(backoff);
+    makeScheduler(backoff)('NextPert', 0);
+    await settle();
+    expect(st.status).not.toBe('error');
+  });
+
+  test('a real failure (500) STILL marks error — the fix must not swallow those', async () => {
+    roster = [{ agent_id: 3, agent_name: 'NextPert', effort_override: 'high' }];
+    spawnStatus = 500;
+    spawnBody = { error: 'boom' };
+    const backoff = new BackoffManager();
+    const st = seededState(backoff);
+    makeScheduler(backoff)('NextPert', 0);
+    await settle();
+    expect(st.status).toBe('error');
   });
 });

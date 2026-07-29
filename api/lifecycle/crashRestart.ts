@@ -78,6 +78,40 @@ export function makeCrashRestartScheduler(
           state.provider = freshRuntime || null;
           backoff.markSpawned(agentName, terminalId, session.sessionId || '', state.provider);
           console.log(`[Lifecycle] ${agentName}: auto-restarted successfully`);
+        } else if (result.status === 409) {
+          // 409 = the terminal is ALREADY RUNNING. Something else (the spawn
+          // orchestrator, or a user-initiated restart) got there first, so our
+          // job is done — this is success-by-someone-else, not a failure.
+          //
+          // Treating it as an error was actively harmful: observed 2026-07-29,
+          // a pane was respawned successfully and THEN flagged status='error'
+          // by this redundant attempt losing the race. That reports a healthy
+          // agent as errored and can block a later legitimate restart, because
+          // the error state is what a subsequent crash check reads.
+          //
+          // Adopt the winner's terminal id when the response carries one so the
+          // backoff manager tracks the live terminal rather than a stale one.
+          let adopted = '';
+          try {
+            const data = await result.json();
+            adopted = data?.terminalId || data?.data?.terminalId || '';
+          } catch {
+            // Body is optional here; absence is not an error.
+          }
+          if (adopted) {
+            state.provider = freshRuntime || null;
+            backoff.markSpawned(agentName, adopted, session.sessionId || '', state.provider);
+          } else {
+            // No id to adopt, but 409 still PROVES the agent is running. The
+            // state arrives here as 'error' (what markExited left behind), so
+            // clearing it is the whole point — otherwise a live agent stays
+            // flagged as errored purely because the 409 response had no body.
+            state.status = 'ready';
+          }
+          console.log(
+            `[Lifecycle] ${agentName}: already running (409) — another path restarted it` +
+              (adopted ? `; adopted terminal ${adopted}` : ''),
+          );
         } else {
           state.status = 'error';
           console.error(`[Lifecycle] ${agentName}: auto-restart failed (HTTP ${result.status})`);
