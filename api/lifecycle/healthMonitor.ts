@@ -48,7 +48,34 @@ export class HealthMonitor {
    * Handle a PTY exit event from Electron.
    * exitCode 0 = clean exit, != 0 = crash with auto-restart.
    */
-  handlePtyExit(agentName: string, terminalId: string, exitCode: number): void {
+  /**
+   * @param reason Present when the desktop killed this PTY ON PURPOSE (kill,
+   *   restart, project teardown). Absent = a genuine unexpected exit.
+   */
+  handlePtyExit(
+    agentName: string,
+    terminalId: string,
+    exitCode: number,
+    reason?: string,
+  ): void {
+    // A DELIBERATE kill is not a crash, and a tree-kill exits non-zero exactly
+    // like one — so exit code alone cannot tell them apart. Without this, a
+    // restart (kill, then spawn) had its kill counted as a crash: the scheduler
+    // fired, the freshly-spawned pane was already up, and the attempt came back
+    // 409. Observed as a QAPert restart loop on 2026-07-29.
+    //
+    // Also skips markExited deliberately: counting intentional restarts as
+    // crashes burns the consecutive-crash budget and would eventually disable
+    // auto-restart for an agent that never actually crashed. The follow-up
+    // spawn (or teardown) is what sets the next state.
+    if (reason) {
+      console.log(
+        `[HealthMonitor] ${agentName}: PTY exited intentionally (reason=${reason}, ` +
+          `code=${exitCode}) — not a crash, no restart scheduled`,
+      );
+      return;
+    }
+
     console.log(`[HealthMonitor] ${agentName}: PTY exited (code=${exitCode}, terminal=${terminalId})`);
 
     const { shouldRestart, delay } = this.backoff.markExited(agentName, exitCode);

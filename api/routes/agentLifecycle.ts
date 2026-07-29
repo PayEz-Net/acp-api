@@ -349,7 +349,9 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
 
   // POST /internal/pty/exit — Electron reports PTY exit (internal, not proxied)
   router.post('/internal/pty-exit', (req: Request, res: Response) => {
-    const { agentName, terminalId, exitCode } = req.body || {};
+    // `reason` is present when the desktop killed the PTY on purpose. Without
+    // it every exit looked like a crash — see healthMonitor.handlePtyExit.
+    const { agentName, terminalId, exitCode, reason } = req.body || {};
 
     if (!agentName || exitCode === undefined) {
       res.status(400).json(
@@ -358,7 +360,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       return;
     }
 
-    healthMonitor.handlePtyExit(agentName, terminalId || '', exitCode);
+    healthMonitor.handlePtyExit(agentName, terminalId || '', exitCode, reason);
 
     res.json(success({
       agent_name: agentName,
