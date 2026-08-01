@@ -82,6 +82,9 @@ Canonical text: `payez-PI-mono/docs/ENGINEERING-DOCTRINE.md` (`e987342`). The fi
 > silent fallbacks to HTTP 200** (`:568` name unresolved, `:598` cloud unreachable, `:613` cloud
 > non-2xx) — each returns a degraded "thin shape" that callers cannot distinguish from a real cloud
 > profile. Three agents independently treated a 200 from this endpoint as proof an agent existed.
+> **The endpoint is asymmetric, and the usable half is worth keeping:** a **404 is trustworthy** —
+> an unknown name never reaches the fallbacks, so 404 means *not in cloud and not in SessionManager*.
+> A **200 is not** — it means *known*, with the answering registry undetermined. *(NextPert)*
 > **Related:** `POST /v1/mail/send` and `agents.ts:709` both emit `AGENT_NOT_FOUND` for conditions
 > that are not "no such agent" — an error string that names the wrong cause is worse than a generic
 > one, because it is actionable *and* wrong.
