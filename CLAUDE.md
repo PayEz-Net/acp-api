@@ -66,6 +66,26 @@ See `config.ts` — key settings:
 - `VIBESQL_URL` — VibeSQL endpoint (default http://localhost:52411)
 - `VIBE_API_URL` — Vibe Public API (default https://api.idealvibe.online)
 
+## Engineering doctrine — read this before writing code
+
+Canonical text: `payez-PI-mono/docs/ENGINEERING-DOCTRINE.md` (`e987342`). The five rules, in full:
+
+1. **No fallbacks. The default answer is NO.** A fallback does not prevent a bug — it converts a
+   failure into a plausible wrong answer and moves it somewhere harder to find. **Fail loudly.**
+2. **Config is data**, not a hardcoded default with a config-shaped name.
+3. **Verify at the source, and know which instrument you used.** Source, disk, and wire are three
+   different instruments and they disagree. Two people reading the same file is one measurement, twice.
+4. **Check the package first** — does `@payez/next-mvp` already do this?
+5. **Decision-relevance:** *"If I learn this, what do I do differently?"* If the answer is nothing, **stop.**
+
+> **This repo violates rule 1 today.** `api/routes/agents.ts` `GET /:identifier/profile` has **three
+> silent fallbacks to HTTP 200** (`:568` name unresolved, `:598` cloud unreachable, `:613` cloud
+> non-2xx) — each returns a degraded "thin shape" that callers cannot distinguish from a real cloud
+> profile. Three agents independently treated a 200 from this endpoint as proof an agent existed.
+> **Related:** `POST /v1/mail/send` and `agents.ts:709` both emit `AGENT_NOT_FOUND` for conditions
+> that are not "no such agent" — an error string that names the wrong cause is worse than a generic
+> one, because it is actionable *and* wrong.
+
 ## Architecture Notes
 
 - **VibeSQL is PostgreSQL.** Never reference SQLite. Storage adapter speaks `POST /v1/query` with `{ "sql": "..." }`.
