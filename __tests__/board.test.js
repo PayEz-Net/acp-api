@@ -160,6 +160,28 @@ describe('editTask (G1)', () => {
     storage.getTask.mockResolvedValue({ ...sampleTask });
     await expect(editTask(storage, 1, { priority: 'urgent' }, 'jon')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
   });
+
+  test('persists archived:true via PATCH (kanban-archive P0)', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    const result = await editTask(storage, 1, { archived: true }, 'jon');
+    expect(result.archived).toBe(true);
+    expect(storage.updateTask.mock.calls[0][1]).toMatchObject({ archived: true });
+  });
+
+  test('persists archived:false via PATCH (un-archive round-trips, not just set-true)', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask, archived: true });
+    const result = await editTask(storage, 1, { archived: false }, 'jon');
+    expect(result.archived).toBe(false);
+    expect(storage.updateTask.mock.calls[0][1]).toMatchObject({ archived: false });
+  });
+
+  test('rejects non-boolean archived (no coercion)', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    await expect(editTask(storage, 1, { archived: 'true' }, 'jon')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+  });
 });
 
 describe('comments + archive (G3/G5)', () => {

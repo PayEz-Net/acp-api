@@ -18,7 +18,10 @@ const TRANSITIONS = {
 
 // G1: PATCH touches FREE-FORM fields only. status + assignedTo are excluded —
 // they keep their guarded endpoints so transitions/assignment-lock are unbypassable.
-const EDITABLE_FIELDS = ['title', 'description', 'priority', 'milestone', 'blockers', 'specPath', 'filesChanged'];
+// `archived` IS editable via PATCH (in addition to the dedicated POST /archive|/unarchive):
+// the cloud vibe-api contract accepts PATCH {archived}, and without it here the field was
+// rejected 400 at :3001 — the fix was unreachable through the ACP path. (kanban-archive P0.)
+const EDITABLE_FIELDS = ['title', 'description', 'priority', 'milestone', 'blockers', 'specPath', 'filesChanged', 'archived'];
 
 export { VALID_STATUSES, VALID_PRIORITIES, TRANSITIONS, EDITABLE_FIELDS };
 
@@ -104,6 +107,11 @@ export async function editTask(storage, id, updates, actor, projectId) {
   if (Object.keys(clean).length === 0) throw invalid('No editable fields provided');
   if (clean.priority != null && !VALID_PRIORITIES.includes(clean.priority)) {
     throw invalid(`Invalid priority "${clean.priority}". Valid: ${VALID_PRIORITIES.join(', ')}`);
+  }
+  // archived must be a real boolean — reject a string/number so un-archive (false) round-trips as
+  // a value, never a truthy artifact. Fail loud, no coercion. (doctrine rule 1.)
+  if ('archived' in clean && typeof clean.archived !== 'boolean') {
+    throw invalid(`Field "archived" must be a boolean (true|false), got ${typeof clean.archived}`);
   }
   clean.updatedAt = new Date().toISOString();
   await storage.updateTask(id, clean, projectId);
