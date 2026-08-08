@@ -106,7 +106,7 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       // failure on a real transition is now an anomaly — log it LOUDLY (error), don't
       // normalize it as "expected/skipped".
       try {
-        await autoMailOnStatusChange(storage, notifyMail, task, status);
+        await autoMailOnStatusChange(storage, notifyMail, task, status, actor);
       } catch (mailErr: any) {
         console.error(`[kanban] status-change notification FAILED for task ${req.params.id} -> ${status} (transition still applied): ${mailErr?.message || mailErr}`);
       }
