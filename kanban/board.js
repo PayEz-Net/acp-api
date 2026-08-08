@@ -198,6 +198,18 @@ export async function archiveTask(storage, id, archived, actor, projectId) {
     err.code = 'ARCHIVE_NOT_PERSISTED';
     throw err;
   }
+  // VALUE read-back (not just row-existence): the prior guard only caught a null row, so a downstream
+  // store that returns 200 but SILENTLY DROPS `archived` (echoing false/undefined when true was asked)
+  // still fake-greened. Assert the persisted value equals the requested one — that is the ONLY way the
+  // 200 means what it says. Fail loud (doctrine rule 1) so a non-persisting cloud can never masquerade
+  // as success. (This is the exact class the whole kanban-archive P0 is about.)
+  if (updated.archived !== !!archived) {
+    const err = new Error(
+      `Archive did not persist for task ${id}: requested archived=${!!archived}, store reflects ${updated.archived}. ` +
+      `The downstream kanban store dropped the field (its PATCH must accept + echo 'archived').`);
+    err.code = 'ARCHIVE_NOT_PERSISTED';
+    throw err;
+  }
   await recordActivity(storage, id, actor, archived ? 'archived' : 'unarchived', { projectId });
   return updated;
 }
