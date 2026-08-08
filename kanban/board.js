@@ -18,6 +18,15 @@ const TRANSITIONS = {
 
 // G1: PATCH touches FREE-FORM fields only. status + assignedTo are excluded —
 // they keep their guarded endpoints so transitions/assignment-lock are unbypassable.
+//
+// 31-WO §T4: ONE shared validation rule, not N per-service copies — "N implementations
+// become N dialects." THIS is a second copy: PayEz-Core's .NET KanbanRepository has its
+// own independent field-editability check (fixed there in 7974a9773 - reject-unknown-fields
+// + persist `archived` via Set()). Deploying that .NET fix does NOT change what this proxy
+// enforces - THIS array is what :3001 actually validates against. If you're adding/removing
+// a field here, the .NET side needs the matching change too, or the two drift again (see
+// card 191876, found 2026-08-08 - three agents rediscovered the same fixed defect because
+// nothing on either side named the other).
 const EDITABLE_FIELDS = ['title', 'description', 'priority', 'milestone', 'blockers', 'specPath', 'filesChanged'];
 
 export { VALID_STATUSES, VALID_PRIORITIES, TRANSITIONS, EDITABLE_FIELDS };
