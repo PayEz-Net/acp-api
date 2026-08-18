@@ -57,12 +57,19 @@ describe('SessionManager', () => {
   });
 
   test('getAgentRegistration returns registered agent', async () => {
+    // getAgentRegistration now refuses to answer until the cloud roster has
+    // hydrated (Aurum 7269: never read an empty roster as "not registered").
+    // Simulate a successfully hydrated roster instead of hitting the cloud.
+    manager._agents = new Set(['DotNetPert']);
+    manager._rosterHydratedAt = Date.now();
     const result = await manager.getAgentRegistration('agent:DotNetPert');
     expect(result).not.toBeNull();
     expect(result.name).toBe('DotNetPert');
   });
 
   test('getAgentRegistration returns null for unknown agent', async () => {
+    manager._agents = new Set(['DotNetPert']);
+    manager._rosterHydratedAt = Date.now();
     const result = await manager.getAgentRegistration('agent:Unknown');
     expect(result).toBeNull();
   });

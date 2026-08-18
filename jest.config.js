@@ -9,6 +9,7 @@ export default {
     }],
   },
   testEnvironment: 'node',
+  setupFiles: ['./jest.env.setup.js'],
   extensionsToTreatAsEsm: ['.ts'],
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
