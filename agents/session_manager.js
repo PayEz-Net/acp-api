@@ -500,23 +500,29 @@ export class SessionManager {
   }
 
   _rowToTask(row) {
+    // 29442 (RigPert/Jon): make ABSENT fields explicit null, never undefined. JSON.stringify
+    // drops undefined-valued keys entirely, so a field the backend omitted (e.g. updated_at on
+    // the pre-fix list rows) VANISHED from the wire instead of reading null — consumers could not
+    // tell "field absent" from "field empty", and that is how updatedAt:undefined became invisible.
+    // archived and projectId were already explicit; extend the same discipline to every nullable
+    // field so a missing key is loud (null on the wire), not silent (absent).
     return {
       id: row.id,
-      title: row.title,
-      description: row.description,
-      status: row.status,
-      priority: row.priority,
-      assignedTo: row.assigned_to,
-      createdBy: row.created_by,
-      specPath: row.spec_path,
-      milestone: row.milestone,
+      title: row.title ?? null,
+      description: row.description ?? null,
+      status: row.status ?? null,
+      priority: row.priority ?? null,
+      assignedTo: row.assigned_to ?? null,
+      createdBy: row.created_by ?? null,
+      specPath: row.spec_path ?? null,
+      milestone: row.milestone ?? null,
       filesChanged: Array.isArray(row.files_changed) ? row.files_changed : (typeof row.files_changed === 'string' ? JSON.parse(row.files_changed) : []),
-      blockers: row.blockers,
+      blockers: row.blockers ?? null,
       archived: row.archived === true,
       projectId: row.project_id ?? null,
-      created_at: row.created_at,
-      updatedAt: row.updated_at,
-      completedAt: row.completed_at,
+      created_at: row.created_at ?? null,
+      updatedAt: row.updated_at ?? null,
+      completedAt: row.completed_at ?? null,
     };
   }
 

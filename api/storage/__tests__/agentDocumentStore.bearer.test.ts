@@ -32,18 +32,22 @@ describe('AgentDocumentStore', () => {
     delete (globalThis as any).fetch;
   });
 
-  it('posts to Vibe API /v1/query with Bearer token and X-Client-Id', async () => {
+  it('posts to Vibe API agent_documents table with Bearer token and X-Client-Id', async () => {
+    // Product moved createDocument off the raw-SQL /v1/query lane onto the REST
+    // collections API (see rest()/tablePath() in agentDocumentStore.ts); mocks and
+    // assertions below match the CURRENT contract.
     fetchMock
+      // listAllRows: GET table rows (drives nextLogicalId)
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true, data: [{ next_id: 1 }] }),
+        text: async () => JSON.stringify({ success: true, data: [] }),
       } as any)
+      // rest POST: insert the new row
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({
+        text: async () => JSON.stringify({
           success: true,
           data: [{
-            document_id: 1,
             data: {
               document_id: 1,
               title: 'T',
@@ -62,8 +66,8 @@ describe('AgentDocumentStore', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const insertCall = fetchMock.mock.calls.find(
       (c) =>
-        (c[0] as string).includes('/v1/query') &&
-        String(c[1]?.body).includes('INSERT')
+        (c[0] as string).includes('/v1/collections/vibe_agents/tables/agent_documents') &&
+        c[1]?.method === 'POST'
     );
     expect(insertCall).toBeDefined();
     expect(insertCall![1]?.headers).toMatchObject({
